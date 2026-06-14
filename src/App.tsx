@@ -856,6 +856,25 @@ export default function App() {
   }
 
   function zoomCanvas(event: ReactWheelEvent<HTMLDivElement>) {
+    const selectedElement = activeTemplateRef.current.elements.find((element) => element.id === selectedId);
+    const direction = event.deltaY > 0 ? -1 : 1;
+
+    if (selectedElement?.kind === "text" || selectedElement?.kind === "marker") {
+      event.preventDefault();
+      updateElement(selectedElement.id, {
+        fontSize: Math.max(4, Number((selectedElement.fontSize + direction).toFixed(1))),
+      });
+      return;
+    }
+
+    if (selectedElement?.kind === "box" || selectedElement?.kind === "table") {
+      event.preventDefault();
+      updateElement(selectedElement.id, {
+        borderWidth: Math.max(0, Number(((selectedElement.borderWidth ?? 1) + direction * 0.1).toFixed(1))),
+      } as Partial<DocumentElement>);
+      return;
+    }
+
     const container = event.currentTarget;
     const canScrollVertically = container.scrollHeight > container.clientHeight;
     const canScrollHorizontally = container.scrollWidth > container.clientWidth;
@@ -872,7 +891,6 @@ export default function App() {
     }
 
     event.preventDefault();
-    const direction = event.deltaY > 0 ? -1 : 1;
     setZoom((current) => clampZoom(current + direction * ZOOM_STEP));
   }
 
