@@ -578,6 +578,14 @@ button {
   width: 100%;
 }
 
+.arrow-element {
+  position: relative;
+}
+
+.arrow-element svg {
+  display: block;
+}
+
 .arrow-element line,
 .arrow-element path {
   fill: none;
@@ -592,6 +600,28 @@ button {
   stroke: #172033;
 }
 
+.arrow-label {
+  color: #172033;
+  left: 50%;
+  line-height: 1;
+  paint-order: stroke;
+  pointer-events: none;
+  position: absolute;
+  text-align: center;
+  text-shadow:
+    -1px -1px 0 #ffffff,
+    1px -1px 0 #ffffff,
+    -1px 1px 0 #ffffff,
+    1px 1px 0 #ffffff;
+  top: 50%;
+  transform: translate(-50%, -50%);
+  white-space: nowrap;
+}
+
+.arrow-label.vertical {
+  transform: translate(-50%, -50%) rotate(-90deg);
+}
+
 .arrow-element text {
   fill: #172033;
   paint-order: stroke;
@@ -601,7 +631,7 @@ button {
 }
 
 .table-element {
-  border: 1px solid #172033;
+  border: var(--table-border-width, 1px) solid #172033;
   display: grid;
 }
 
@@ -612,8 +642,8 @@ button {
 }
 
 .table-element span {
-  border-bottom: 1px solid #172033;
-  border-right: 1px solid #172033;
+  border-bottom: var(--table-border-width, 1px) solid #172033;
+  border-right: var(--table-border-width, 1px) solid #172033;
   display: flex;
   min-width: 0;
   overflow: hidden;

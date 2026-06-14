@@ -1699,7 +1699,8 @@ function ElementContent({
             gridTemplateColumns: columnWidths.map((width) => `${width * PX_PER_MM * zoom}px`).join(" "),
             gridTemplateRows: rowHeights.map((height) => `${height * PX_PER_MM * zoom}px`).join(" "),
             fontSize: table.fontSize,
-          }}
+            "--table-border-width": `${table.borderWidth ?? 1}px`,
+          } as CSSProperties}
         >
           {Array.from({ length: table.rows * table.columns }).map((_, index) => {
             const row = Math.floor(index / table.columns);
@@ -1842,6 +1843,16 @@ function PropertiesPanel({
 
       {element.kind === "line" && (
         <LineProperties line={element} onChange={onChange} />
+      )}
+
+      {element.kind === "box" && (
+        <NumberInput
+          label="Grubość kreski"
+          min={0}
+          step={0.1}
+          value={element.borderWidth}
+          onChange={(borderWidth) => onChange({ borderWidth } as Partial<DocumentElement>)}
+        />
       )}
 
       {element.kind === "arrow" && (
@@ -2068,6 +2079,13 @@ function TableProperties({
           onChange={(event) => onChange({ fontSize: Number(event.target.value) } as Partial<DocumentElement>)}
         />
       </label>
+      <NumberInput
+        label="Grubość kreski"
+        min={0}
+        step={0.1}
+        value={normalizedTable.borderWidth ?? 1}
+        onChange={(borderWidth) => onChange({ borderWidth } as Partial<DocumentElement>)}
+      />
 
       {selectedCell && selectedTableCell && (
         <div className="selected-table-part wide">
@@ -2412,6 +2430,8 @@ function ArrowContent({ arrow }: { arrow: Extract<DocumentElement, { kind: "arro
   const adjustedLabelY = isVertical
     ? labelY
     : labelY + (arrow.labelSide === "below" ? labelOffset : arrow.labelSide === "above" ? -labelOffset : 0);
+  const labelWidth = isVertical ? Math.max(24, arrow.widthMm) : arrow.widthMm;
+  const labelHeight = isVertical ? arrow.heightMm : Math.max(24, arrow.heightMm);
 
   return (
     <div className="arrow-element">
@@ -2441,19 +2461,19 @@ function ArrowContent({ arrow }: { arrow: Extract<DocumentElement, { kind: "arro
             strokeWidth={arrow.strokeWidth}
           />
         )}
-        {arrow.showLabel && (
-          <text
-            x={adjustedLabelX}
-            y={adjustedLabelY}
-            fontSize={arrow.labelFontSize ?? 7}
-            dominantBaseline="middle"
-            textAnchor="middle"
-            transform={isVertical ? `rotate(-90 ${adjustedLabelX} ${adjustedLabelY})` : undefined}
-          >
-            {label}
-          </text>
-        )}
       </svg>
+      {arrow.showLabel && (
+        <span
+          className={isVertical ? "arrow-label vertical" : "arrow-label"}
+          style={{
+            left: `${(adjustedLabelX / labelWidth) * 100}%`,
+            top: `${(adjustedLabelY / labelHeight) * 100}%`,
+            fontSize: arrow.labelFontSize ?? 7,
+          }}
+        >
+          {label}
+        </span>
+      )}
     </div>
   );
 }
@@ -2792,6 +2812,36 @@ function NumberField({
         onChange={(event) => {
           const nextValue = toMm(Number(event.target.value), unit);
           onChange(typeof minMm === "number" ? Math.max(minMm, nextValue) : nextValue);
+        }}
+      />
+    </label>
+  );
+}
+
+function NumberInput({
+  label,
+  value,
+  min,
+  step = 1,
+  onChange,
+}: {
+  label: string;
+  value: number;
+  min?: number;
+  step?: number;
+  onChange: (value: number) => void;
+}) {
+  return (
+    <label>
+      {label}
+      <input
+        type="number"
+        min={min}
+        step={step}
+        value={formatNumber(value)}
+        onChange={(event) => {
+          const nextValue = Number(event.target.value);
+          onChange(typeof min === "number" ? Math.max(min, nextValue) : nextValue);
         }}
       />
     </label>
@@ -3279,6 +3329,7 @@ function barcodeSymbologyLabel(symbology: Extract<DocumentElement, { kind: "barc
 function normalizeTable(table: TableElement): TableElement {
   return {
     ...table,
+    borderWidth: table.borderWidth ?? 1,
     columnWidthsMm: normalizeDistribution(table.columnWidthsMm, table.columns, table.widthMm),
     rowHeightsMm: normalizeDistribution(table.rowHeightsMm, table.rows, table.heightMm),
     cells: normalizeCells(table.cells, table.rows, table.columns),

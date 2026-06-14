@@ -84,6 +84,7 @@ export type TableElement = ElementBase & {
   rowHeightsMm?: number[];
   cells?: TableCell[];
   fontSize: number;
+  borderWidth?: number;
 };
 
 export type TableCell = {
