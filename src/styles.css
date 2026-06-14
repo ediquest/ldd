@@ -990,16 +990,36 @@ button {
   z-index: 15;
 }
 
+.marker-panel-toggle {
+  align-items: center;
+  background: #ffffff;
+  border: 1px solid #cfd8e6;
+  border-radius: 7px 7px 0 0;
+  bottom: min(42vh, 360px);
+  box-shadow: 0 -6px 18px rgba(22, 34, 51, 0.1);
+  color: #172033;
+  display: flex;
+  gap: 6px;
+  min-height: 34px;
+  padding: 7px 10px;
+  position: fixed;
+  right: 312px;
+  transform: translateY(1px);
+  transition:
+    bottom 220ms ease,
+    box-shadow 180ms ease;
+  z-index: 16;
+}
+
+.marker-panel-toggle:not(.open) {
+  border-radius: 7px;
+  bottom: 12px;
+}
+
 .marker-panel.open {
   opacity: 1;
   pointer-events: auto;
   transform: translateY(0);
-}
-
-.marker-panel.expanded {
-  height: auto;
-  max-height: none;
-  top: 72px;
 }
 
 .marker-panel-header {
@@ -1149,7 +1169,18 @@ button {
 }
 
 .marker-table tr.active td {
-  background: #fff5f5;
+  animation: marker-row-focus 900ms ease;
+  background: #ecfdf3;
+}
+
+@keyframes marker-row-focus {
+  0% {
+    background: #d1fadf;
+  }
+
+  100% {
+    background: #ecfdf3;
+  }
 }
 
 .marker-table input,
@@ -1200,6 +1231,10 @@ button {
   .marker-panel {
     left: 240px;
     right: 0;
+  }
+
+  .marker-panel-toggle {
+    right: 12px;
   }
 }
 

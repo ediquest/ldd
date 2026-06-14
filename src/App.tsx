@@ -31,6 +31,8 @@ import {
 import {
   Box,
   ArrowRight,
+  ChevronDown,
+  ChevronUp,
   FileText,
   Image,
   LayoutTemplate,
@@ -55,7 +57,7 @@ import {
   defaultMarkerColumns,
   starterTemplates,
 } from "./documentFactory";
-import { deleteTemplate, loadTemplates, saveTemplate } from "./db";
+import { clearDraft, deleteTemplate, loadDraft, loadDrafts, loadTemplates, saveDraft, saveTemplate } from "./db";
 import type {
   DocumentElement,
   DocumentPage,
@@ -180,6 +182,7 @@ export default function App() {
   const [selectedTableCell, setSelectedTableCell] = useState<TableCellSelection | null>(null);
   const [editingTableCell, setEditingTableCell] = useState<TableCellSelection | null>(null);
   const [status, setStatus] = useState("Gotowe do pracy");
+  const [autosaveReady, setAutosaveReady] = useState(false);
   const [zoom, setZoom] = useState(0.86);
   const [unit, setUnit] = useState<MeasurementUnit>("mm");
   const [assistSettings, setAssistSettings] = useState<AssistSettings>({
@@ -190,7 +193,7 @@ export default function App() {
   });
   const [activeGuides, setActiveGuides] = useState<ActiveGuides>({ vertical: [], horizontal: [] });
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
-  const [markerPanelExpanded, setMarkerPanelExpanded] = useState(false);
+  const [markerPanelOpen, setMarkerPanelOpen] = useState(true);
   const [starterTemplatesOpen, setStarterTemplatesOpen] = useState(false);
   const [savedTemplatesOpen, setSavedTemplatesOpen] = useState(true);
   const [markerColumnWidths, setMarkerColumnWidths] = useState<MarkerColumnWidths>(() => loadMarkerColumnWidths());
@@ -199,6 +202,9 @@ export default function App() {
   const tableResizeRef = useRef<TableResizeState | null>(null);
   const markerPanelRef = useRef<HTMLElement | null>(null);
   const pageRef = useRef<HTMLDivElement | null>(null);
+  const activeTemplateRef = useRef(activeTemplate);
+  const skipNextAutosaveRef = useRef(true);
+  const autosaveTimerRef = useRef<number | null>(null);
 
   const selectedElement = useMemo(
     () => activeTemplate.elements.find((element) => element.id === selectedId) ?? null,
@@ -214,15 +220,93 @@ export default function App() {
   );
 
   useEffect(() => {
-    loadTemplates()
-      .then((storedTemplates) => {
+    activeTemplateRef.current = activeTemplate;
+  }, [activeTemplate]);
+
+  function clearAutosaveTimer() {
+    if (!autosaveTimerRef.current) {
+      return;
+    }
+
+    window.clearTimeout(autosaveTimerRef.current);
+    autosaveTimerRef.current = null;
+  }
+
+  function saveDraftNow(template: DocumentTemplate = activeTemplateRef.current) {
+    clearAutosaveTimer();
+    return saveDraft(template)
+      .then(() => setStatus(`Zapisano automatycznie: ${new Date().toLocaleTimeString("pl-PL")}`))
+      .catch(() => setStatus("Nie udało się zapisać szkicu"));
+  }
+
+  useEffect(() => {
+    Promise.all([loadTemplates(), loadDrafts()])
+      .then(([storedTemplates, drafts]) => {
         setTemplates(storedTemplates);
-        if (storedTemplates[0]) {
-          setActiveTemplate(storedTemplates[0]);
-          setSelectedId(storedTemplates[0].elements[0]?.id ?? null);
+        const newestDraft = drafts
+          .filter((draft) => {
+            const savedTemplate = storedTemplates.find((template) => template.id === draft.template.id);
+            return !savedTemplate || draft.template.updatedAt.localeCompare(savedTemplate.updatedAt) > 0;
+          })
+          .sort((a, b) => b.savedAt.localeCompare(a.savedAt))[0];
+        const shouldRestoreDraft =
+          newestDraft &&
+          window.confirm(
+            `Znaleziono automatycznie zapisany szkic dokumentu "${newestDraft.template.name}". Przywrócić niezapisane zmiany?`,
+          );
+        const templateToOpen = shouldRestoreDraft ? newestDraft.template : storedTemplates[0];
+
+        if (newestDraft && !shouldRestoreDraft) {
+          void clearDraft(newestDraft.id);
         }
+
+        if (templateToOpen) {
+          setActiveTemplate(templateToOpen);
+          setSelectedId(templateToOpen.elements[0]?.id ?? null);
+          setStatus(shouldRestoreDraft ? "Przywrócono szkic autosave" : "Gotowe do pracy");
+        }
+        skipNextAutosaveRef.current = true;
+        setAutosaveReady(true);
       })
-      .catch(() => setStatus("Nie udało się odczytać IndexedDB"));
+      .catch(() => {
+        setStatus("Nie udało się odczytać IndexedDB");
+        setAutosaveReady(true);
+      });
+  }, []);
+
+  useEffect(() => {
+    if (!autosaveReady) {
+      return;
+    }
+
+    if (skipNextAutosaveRef.current) {
+      skipNextAutosaveRef.current = false;
+      return;
+    }
+
+    clearAutosaveTimer();
+
+    setStatus("Zapisywanie automatyczne...");
+    autosaveTimerRef.current = window.setTimeout(() => {
+      autosaveTimerRef.current = null;
+      void saveDraftNow(activeTemplate);
+    }, 900);
+
+    return clearAutosaveTimer;
+  }, [activeTemplate, autosaveReady]);
+
+  useEffect(() => {
+    function onBeforeUnload(event: BeforeUnloadEvent) {
+      if (!autosaveTimerRef.current) {
+        return;
+      }
+
+      event.preventDefault();
+      event.returnValue = "";
+    }
+
+    window.addEventListener("beforeunload", onBeforeUnload);
+    return () => window.removeEventListener("beforeunload", onBeforeUnload);
   }, []);
 
   useEffect(() => {
@@ -287,34 +371,12 @@ export default function App() {
     };
   }, []);
 
-  useEffect(() => {
-    function onPointerDown(event: globalThis.PointerEvent) {
-      const panel = markerPanelRef.current;
-      const target = event.target;
-
-      if (!panel || !(target instanceof Node) || panel.contains(target)) {
-        return;
-      }
-
-      if (target instanceof Element && target.closest(".right-panel")) {
-        return;
-      }
-
-      if (markerPanelExpanded || selectedElement?.kind === "marker") {
-        setMarkerPanelExpanded(false);
-        setSelectedId((current) => {
-          const currentElement = activeTemplate.elements.find((element) => element.id === current);
-          return currentElement?.kind === "marker" ? null : current;
-        });
-      }
-    }
-
-    window.addEventListener("pointerdown", onPointerDown);
-    return () => window.removeEventListener("pointerdown", onPointerDown);
-  }, [activeTemplate.elements, markerPanelExpanded, selectedElement?.kind]);
-
   function updateDocument(updater: (current: DocumentTemplate) => DocumentTemplate) {
-    setActiveTemplate((current) => updater({ ...current, updatedAt: new Date().toISOString() }));
+    setActiveTemplate((current) => {
+      const nextTemplate = updater({ ...current, updatedAt: new Date().toISOString() });
+      activeTemplateRef.current = nextTemplate;
+      return nextTemplate;
+    });
   }
 
   function updateElement(id: string, patch: Partial<DocumentElement>) {
@@ -387,7 +449,7 @@ export default function App() {
     }));
     setSelectedId(duplicatedElement.id);
     if (duplicatedElement.kind === "marker") {
-      setMarkerPanelExpanded(false);
+      setMarkerPanelOpen(true);
     }
 
     return duplicatedElement.id;
@@ -487,15 +549,33 @@ export default function App() {
     setEditingTableCell(null);
     setContextMenu(null);
     if (placedElement.kind === "marker") {
-      setMarkerPanelExpanded(false);
+      setMarkerPanelOpen(true);
     }
   }
 
   async function persistTemplate() {
+    clearAutosaveTimer();
     await saveTemplate(activeTemplate);
+    await clearDraft(activeTemplate.id);
     const storedTemplates = await loadTemplates();
     setTemplates(storedTemplates);
     setStatus(`Zapisano: ${new Date().toLocaleTimeString("pl-PL")}`);
+  }
+
+  async function openSavedTemplate(template: DocumentTemplate) {
+    await saveDraftNow();
+    const draft = await loadDraft(template.id);
+    const templateToOpen =
+      draft && draft.template.updatedAt.localeCompare(template.updatedAt) > 0 ? draft.template : template;
+
+    skipNextAutosaveRef.current = true;
+    setActiveTemplate(templateToOpen);
+    activeTemplateRef.current = templateToOpen;
+    setSelectedId(templateToOpen.elements[0]?.id ?? null);
+    setSelectedTablePart(null);
+    setSelectedTableCell(null);
+    setEditingTableCell(null);
+    setStatus(draft && templateToOpen === draft.template ? "Wczytano szkic autosave dokumentu" : "Wczytano zapisany dokument");
   }
 
   async function duplicateTemplate(template: DocumentTemplate) {
@@ -525,6 +605,7 @@ export default function App() {
     }
 
     await deleteTemplate(template.id);
+    await clearDraft(template.id);
     const storedTemplates = await loadTemplates();
     setTemplates(storedTemplates);
 
@@ -623,16 +704,22 @@ export default function App() {
     setStatus("Skopiowano tabelę znaczników");
   }
 
-  function createNewTemplate() {
+  async function createNewTemplate() {
+    await saveDraftNow();
     const freshTemplate = createTemplate(`Dokument ${templates.length + 1}`);
+    skipNextAutosaveRef.current = true;
     setActiveTemplate(freshTemplate);
+    activeTemplateRef.current = freshTemplate;
     setSelectedId(freshTemplate.elements[0]?.id ?? null);
     setStatus("Utworzono nowy dokument");
   }
 
-  function createFromStarter(starterId: Parameters<typeof createTemplateFromStarter>[0]) {
+  async function createFromStarter(starterId: Parameters<typeof createTemplateFromStarter>[0]) {
+    await saveDraftNow();
     const freshTemplate = createTemplateFromStarter(starterId);
+    skipNextAutosaveRef.current = true;
     setActiveTemplate(freshTemplate);
+    activeTemplateRef.current = freshTemplate;
     setSelectedId(freshTemplate.elements[0]?.id ?? null);
     setStatus("Wczytano szablon startowy");
   }
@@ -805,7 +892,7 @@ export default function App() {
 
   return (
     <main
-      className={selectedElement?.kind === "marker" || markerPanelExpanded ? "app-shell marker-panel-visible" : "app-shell"}
+      className={markerPanelOpen ? "app-shell marker-panel-visible" : "app-shell"}
       style={
         {
           "--page-width": `${activeTemplate.page.widthMm}mm`,
@@ -889,10 +976,7 @@ export default function App() {
                 <div key={template.id} className={template.id === activeTemplate.id ? "template-item active" : "template-item"}>
                   <button
                     className="template-open-button"
-                    onClick={() => {
-                      setActiveTemplate(template);
-                      setSelectedId(template.elements[0]?.id ?? null);
-                    }}
+                    onClick={() => void openSavedTemplate(template)}
                   >
                     <strong>{template.name}</strong>
                     <span>{new Date(template.updatedAt).toLocaleString("pl-PL")}</span>
@@ -1036,7 +1120,7 @@ export default function App() {
                     setEditingTableCell(null);
                   }
                   if (element.kind === "marker") {
-                    setMarkerPanelExpanded(false);
+                    setMarkerPanelOpen(true);
                   }
                   if (element.locked) {
                     return;
@@ -1148,27 +1232,28 @@ export default function App() {
         </section>
       </aside>
 
-      {markers.length > 0 && (
-        <MarkerPanel
-          panelRef={markerPanelRef}
-          markers={markers}
-          columns={markerColumns}
-          columnWidths={markerColumnWidths}
-          selectedMarkerId={selectedElement?.kind === "marker" ? selectedElement.id : null}
-          open={selectedElement?.kind === "marker" || markerPanelExpanded}
-          expanded={markerPanelExpanded}
-          onExpandedChange={setMarkerPanelExpanded}
-          onSelectMarker={(id) => setSelectedId(id)}
-          onChangeMarker={(id, patch) => updateElement(id, patch)}
-          onRenameColumn={renameMarkerColumn}
-          onAddColumn={addMarkerColumn}
-          onDeleteColumn={deleteMarkerColumn}
-          onCopyMarkers={() => void copyMarkersToClipboard()}
-          onColumnWidthChange={(column, width) =>
-            setMarkerColumnWidths((current) => ({ ...current, [column]: Math.max(60, width) }))
-          }
-        />
-      )}
+      <MarkerPanel
+        panelRef={markerPanelRef}
+        markers={markers}
+        columns={markerColumns}
+        columnWidths={markerColumnWidths}
+        selectedMarkerId={selectedElement?.kind === "marker" ? selectedElement.id : null}
+        open={markerPanelOpen}
+        onOpenChange={setMarkerPanelOpen}
+        onSelectMarker={(id) => {
+          setMarkerPanelOpen(true);
+          setSelectedId(id);
+        }}
+        onChangeMarker={(id, patch) => updateElement(id, patch)}
+        onCommitMarkerEdit={() => void saveDraftNow()}
+        onRenameColumn={renameMarkerColumn}
+        onAddColumn={addMarkerColumn}
+        onDeleteColumn={deleteMarkerColumn}
+        onCopyMarkers={() => void copyMarkersToClipboard()}
+        onColumnWidthChange={(column, width) =>
+          setMarkerColumnWidths((current) => ({ ...current, [column]: Math.max(60, width) }))
+        }
+      />
     </main>
   );
 }
@@ -2122,10 +2207,10 @@ function MarkerPanel({
   columnWidths,
   selectedMarkerId,
   open,
-  expanded,
-  onExpandedChange,
+  onOpenChange,
   onSelectMarker,
   onChangeMarker,
+  onCommitMarkerEdit,
   onRenameColumn,
   onAddColumn,
   onDeleteColumn,
@@ -2138,10 +2223,10 @@ function MarkerPanel({
   columnWidths: MarkerColumnWidths;
   selectedMarkerId: string | null;
   open: boolean;
-  expanded: boolean;
-  onExpandedChange: (expanded: boolean) => void;
+  onOpenChange: (open: boolean) => void;
   onSelectMarker: (id: string) => void;
   onChangeMarker: (id: string, patch: Partial<DocumentElement>) => void;
+  onCommitMarkerEdit: () => void;
   onRenameColumn: (columnId: string, label: string) => void;
   onAddColumn: () => void;
   onDeleteColumn: (columnId: string) => void;
@@ -2149,9 +2234,19 @@ function MarkerPanel({
   onColumnWidthChange: (column: MarkerColumnKey, width: number) => void;
 }) {
   const [editingColumnId, setEditingColumnId] = useState<string | null>(null);
-  const visibleMarkers = expanded ? markers : markers.filter((marker) => marker.id === selectedMarkerId);
   const totalColumnWidth = columns.reduce((total, column) => total + markerColumnWidth(columnWidths, column.id), 0);
+  const selectedRowRef = useRef<HTMLTableRowElement | null>(null);
   const resizingColumnRef = useRef<{ column: MarkerColumnKey; startX: number; startWidth: number } | null>(null);
+
+  useEffect(() => {
+    if (!open || !selectedMarkerId) {
+      return;
+    }
+
+    window.setTimeout(() => {
+      selectedRowRef.current?.scrollIntoView({ behavior: "smooth", block: "center" });
+    }, 80);
+  }, [open, selectedMarkerId]);
 
   function onColumnResizeMove(event: PointerEvent<HTMLDivElement>) {
     const resize = resizingColumnRef.current;
@@ -2167,9 +2262,14 @@ function MarkerPanel({
   }
 
   return (
-    <section
+    <>
+      <button className={`marker-panel-toggle ${open ? "open" : ""}`} type="button" onClick={() => onOpenChange(!open)}>
+        {open ? <ChevronDown size={16} /> : <ChevronUp size={16} />}
+        {open ? "Zwiń panel" : "Pokaż znaczniki"}
+      </button>
+      <section
       ref={panelRef}
-      className={`marker-panel ${open ? "open" : ""} ${expanded ? "expanded" : ""}`}
+      className={`marker-panel ${open ? "open" : ""}`}
       onPointerMove={onColumnResizeMove}
       onPointerUp={stopColumnResize}
       onPointerLeave={stopColumnResize}
@@ -2185,9 +2285,6 @@ function MarkerPanel({
           </button>
           <button type="button" onClick={onCopyMarkers}>
             Kopiuj tabelę
-          </button>
-          <button type="button" onClick={() => onExpandedChange(!expanded)}>
-            {expanded ? "Zwiń" : "Pokaż wszystkie"}
           </button>
         </div>
       </header>
@@ -2256,26 +2353,33 @@ function MarkerPanel({
             </tr>
           </thead>
           <tbody>
-            {visibleMarkers.map((marker) => (
-              <tr key={marker.id} className={marker.id === selectedMarkerId ? "active" : ""} onClick={() => onSelectMarker(marker.id)}>
+            {markers.map((marker) => (
+              <tr
+                key={marker.id}
+                ref={marker.id === selectedMarkerId ? selectedRowRef : null}
+                className={marker.id === selectedMarkerId ? "active" : ""}
+                onClick={() => onSelectMarker(marker.id)}
+              >
                 {columns.map((column) => (
                   <td key={column.id}>
                     {column.field === "managementRules" ? (
                       <AutosizeTextarea
                         value={markerColumnValue(marker, column)}
                         onChange={(event) => onChangeMarker(marker.id, markerColumnPatch(marker, column, event.target.value))}
+                        onBlur={onCommitMarkerEdit}
                       />
                     ) : (
                       <input
                         value={markerColumnValue(marker, column)}
                         onChange={(event) => onChangeMarker(marker.id, markerColumnPatch(marker, column, event.target.value))}
+                        onBlur={onCommitMarkerEdit}
                       />
                     )}
                   </td>
                 ))}
               </tr>
             ))}
-            {visibleMarkers.length === 0 && (
+            {markers.length === 0 && (
               <tr>
                 <td colSpan={columns.length}>Dodaj znacznik z menu kontekstowego na kanwie.</td>
               </tr>
@@ -2283,7 +2387,8 @@ function MarkerPanel({
           </tbody>
         </table>
       </div>
-    </section>
+      </section>
+    </>
   );
 }
 
@@ -2643,9 +2748,11 @@ function CellTextarea({
 function AutosizeTextarea({
   value,
   onChange,
+  onBlur,
 }: {
   value: string;
   onChange: (event: ChangeEvent<HTMLTextAreaElement>) => void;
+  onBlur?: () => void;
 }) {
   const textareaRef = useRef<HTMLTextAreaElement | null>(null);
 
@@ -2659,7 +2766,7 @@ function AutosizeTextarea({
     textarea.style.height = `${textarea.scrollHeight}px`;
   }, [value]);
 
-  return <textarea ref={textareaRef} value={value} onChange={onChange} />;
+  return <textarea ref={textareaRef} value={value} onChange={onChange} onBlur={onBlur} />;
 }
 
 function NumberField({
