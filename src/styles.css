@@ -1095,18 +1095,14 @@ button:disabled {
 
 .marker-table-wrap {
   min-height: 0;
-  overflow-x: hidden;
+  overflow-x: auto;
   overflow-y: auto;
-}
-
-.marker-panel.expanded .marker-table-wrap {
-  height: calc(100vh - 132px);
 }
 
 .marker-table {
   border-collapse: collapse;
   table-layout: fixed;
-  width: 100%;
+  min-width: 100%;
 }
 
 .marker-table th,

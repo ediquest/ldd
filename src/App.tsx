@@ -7,6 +7,7 @@ import {
   PointerEvent,
   RefObject,
   ReactNode,
+  WheelEvent as ReactWheelEvent,
   useEffect,
   useMemo,
   useRef,
@@ -72,6 +73,9 @@ import type {
 } from "./types";
 
 const PX_PER_MM = 3.7795275591;
+const MIN_ZOOM = 0.55;
+const MAX_ZOOM = 1.25;
+const ZOOM_STEP = 0.05;
 
 const units: Record<MeasurementUnit, { label: string; suffix: string; factorMm: number; step: number }> = {
   mm: { label: "Milimetry", suffix: "mm", factorMm: 1, step: 1 },
@@ -851,6 +855,27 @@ export default function App() {
     });
   }
 
+  function zoomCanvas(event: ReactWheelEvent<HTMLDivElement>) {
+    const container = event.currentTarget;
+    const canScrollVertically = container.scrollHeight > container.clientHeight;
+    const canScrollHorizontally = container.scrollWidth > container.clientWidth;
+    const canScrollDown = event.deltaY > 0 && container.scrollTop + container.clientHeight < container.scrollHeight;
+    const canScrollUp = event.deltaY < 0 && container.scrollTop > 0;
+    const canScrollRight = event.deltaX > 0 && container.scrollLeft + container.clientWidth < container.scrollWidth;
+    const canScrollLeft = event.deltaX < 0 && container.scrollLeft > 0;
+
+    if (
+      (canScrollVertically && (canScrollDown || canScrollUp)) ||
+      (canScrollHorizontally && (canScrollRight || canScrollLeft))
+    ) {
+      return;
+    }
+
+    event.preventDefault();
+    const direction = event.deltaY > 0 ? -1 : 1;
+    setZoom((current) => clampZoom(current + direction * ZOOM_STEP));
+  }
+
   function onPointerMove(event: PointerEvent<HTMLDivElement>) {
     const tableResize = tableResizeRef.current;
     const drag = dragRef.current;
@@ -1175,9 +1200,9 @@ export default function App() {
               Zoom
               <input
                 type="range"
-                min="0.55"
-                max="1.25"
-                step="0.05"
+                min={MIN_ZOOM}
+                max={MAX_ZOOM}
+                step={ZOOM_STEP}
                 value={zoom}
                 onChange={(event) => setZoom(Number(event.target.value))}
               />
@@ -1193,6 +1218,17 @@ export default function App() {
           onPointerMove={onPointerMove}
           onPointerUp={stopInteractions}
           onPointerLeave={stopInteractions}
+          onWheel={zoomCanvas}
+          onPointerDown={(event) => {
+            if (event.target !== event.currentTarget) {
+              return;
+            }
+
+            setSelectedId(null);
+            setSelectedTablePart(null);
+            setSelectedTableCell(null);
+            setEditingTableCell(null);
+          }}
         >
           <div
             ref={pageRef}
@@ -2459,10 +2495,10 @@ function MarkerPanel({
         </div>
       </header>
       <div className="marker-table-wrap">
-        <table className="marker-table">
+        <table className="marker-table" style={{ width: totalColumnWidth }}>
           <colgroup>
             {columns.map((column) => (
-              <col key={column.id} style={{ width: `${(markerColumnWidth(columnWidths, column.id) / totalColumnWidth) * 100}%` }} />
+              <col key={column.id} style={{ width: markerColumnWidth(columnWidths, column.id) }} />
             ))}
           </colgroup>
           <thead>
@@ -3002,6 +3038,10 @@ function NumberInput({
 
 function roundMm(value: number) {
   return Math.round(value * 2) / 2;
+}
+
+function clampZoom(value: number) {
+  return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(value.toFixed(2))));
 }
 
 function fromMm(valueMm: number, unit: MeasurementUnit) {
