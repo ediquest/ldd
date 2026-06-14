@@ -38,6 +38,7 @@ import {
   LayoutTemplate,
   Lock,
   Copy,
+  Redo2,
   Minus,
   Pencil,
   Plus,
@@ -49,6 +50,7 @@ import {
   Type,
   Trash2,
   Unlock,
+  Undo2,
 } from "lucide-react";
 import {
   createElement,
@@ -108,6 +110,7 @@ type DragState = {
   originalY: number;
   duplicateOnDrag: boolean;
   duplicatedId?: string;
+  historyCaptured?: boolean;
 };
 
 type ResizeState = {
@@ -119,6 +122,7 @@ type ResizeState = {
   originalWidth: number;
   originalHeight: number;
   originalFontSize?: number;
+  historyCaptured?: boolean;
 };
 
 type TableSelection = {
@@ -140,6 +144,7 @@ type TableResizeState = {
   startX: number;
   startY: number;
   originalSizes: number[];
+  historyCaptured?: boolean;
 };
 
 type AssistSettings = {
@@ -173,10 +178,17 @@ const defaultMarkerColumnWidths: MarkerColumnWidths = {
   origin: 180,
   managementRules: 320,
 };
+const HISTORY_LIMIT = 30;
+
+type DocumentUpdateOptions = {
+  history?: "push" | "skip";
+};
 
 export default function App() {
   const [templates, setTemplates] = useState<DocumentTemplate[]>([]);
   const [activeTemplate, setActiveTemplate] = useState<DocumentTemplate>(() => createTemplate());
+  const [undoStack, setUndoStack] = useState<DocumentTemplate[]>([]);
+  const [redoStack, setRedoStack] = useState<DocumentTemplate[]>([]);
   const [selectedId, setSelectedId] = useState<string | null>(null);
   const [selectedTablePart, setSelectedTablePart] = useState<TableSelection | null>(null);
   const [selectedTableCell, setSelectedTableCell] = useState<TableCellSelection | null>(null);
@@ -239,6 +251,54 @@ export default function App() {
       .catch(() => setStatus("Nie udało się zapisać szkicu"));
   }
 
+  function resetHistory() {
+    setUndoStack([]);
+    setRedoStack([]);
+  }
+
+  function pushUndoSnapshot(template: DocumentTemplate = activeTemplateRef.current) {
+    setUndoStack((current) => [...current.slice(-HISTORY_LIMIT + 1), structuredClone(template)]);
+    setRedoStack([]);
+  }
+
+  function applyTemplateState(template: DocumentTemplate) {
+    activeTemplateRef.current = template;
+    setActiveTemplate(template);
+    setSelectedId((current) => (template.elements.some((element) => element.id === current) ? current : null));
+    setSelectedTablePart((current) => (current && template.elements.some((element) => element.id === current.tableId) ? current : null));
+    setSelectedTableCell((current) => (current && template.elements.some((element) => element.id === current.tableId) ? current : null));
+    setEditingTableCell(null);
+    setActiveGuides({ vertical: [], horizontal: [] });
+  }
+
+  function undoDocumentChange() {
+    setUndoStack((current) => {
+      const previousTemplate = current[current.length - 1];
+      if (!previousTemplate) {
+        return current;
+      }
+
+      setRedoStack((redoCurrent) => [...redoCurrent.slice(-HISTORY_LIMIT + 1), structuredClone(activeTemplateRef.current)]);
+      applyTemplateState(structuredClone(previousTemplate));
+      setStatus("Cofnięto zmianę");
+      return current.slice(0, -1);
+    });
+  }
+
+  function redoDocumentChange() {
+    setRedoStack((current) => {
+      const nextTemplate = current[current.length - 1];
+      if (!nextTemplate) {
+        return current;
+      }
+
+      setUndoStack((undoCurrent) => [...undoCurrent.slice(-HISTORY_LIMIT + 1), structuredClone(activeTemplateRef.current)]);
+      applyTemplateState(structuredClone(nextTemplate));
+      setStatus("Ponowiono zmianę");
+      return current.slice(0, -1);
+    });
+  }
+
   useEffect(() => {
     Promise.all([loadTemplates(), loadDrafts()])
       .then(([storedTemplates, drafts]) => {
@@ -263,6 +323,7 @@ export default function App() {
         if (templateToOpen) {
           setActiveTemplate(templateToOpen);
           setSelectedId(templateToOpen.elements[0]?.id ?? null);
+          resetHistory();
           setStatus(shouldRestoreDraft ? "Przywrócono szkic autosave" : "Gotowe do pracy");
         }
         skipNextAutosaveRef.current = true;
@@ -349,6 +410,30 @@ export default function App() {
         deleteElement(selectedId);
       }
 
+      if ((event.ctrlKey || event.metaKey) && !isEditing) {
+        const key = event.key.toLowerCase();
+        if (key === "z" && !event.shiftKey) {
+          event.preventDefault();
+          undoDocumentChange();
+        }
+
+        if (key === "y" || (key === "z" && event.shiftKey)) {
+          event.preventDefault();
+          redoDocumentChange();
+        }
+      }
+
+      if (!isEditing && selectedId && ["ArrowUp", "ArrowDown", "ArrowLeft", "ArrowRight"].includes(event.key)) {
+        event.preventDefault();
+        const directionByKey: Record<string, "up" | "down" | "left" | "right"> = {
+          ArrowUp: "up",
+          ArrowDown: "down",
+          ArrowLeft: "left",
+          ArrowRight: "right",
+        };
+        moveSelectedElementByKeyboard(directionByKey[event.key], event.shiftKey);
+      }
+
       if (event.key === "Escape") {
         setContextMenu(null);
       }
@@ -356,7 +441,7 @@ export default function App() {
 
     window.addEventListener("keydown", onKeyDown);
     return () => window.removeEventListener("keydown", onKeyDown);
-  }, [selectedId]);
+  }, [assistSettings.stepMm, assistSettings.stepMove, selectedId]);
 
   useEffect(() => {
     function closeContextMenu() {
@@ -371,24 +456,28 @@ export default function App() {
     };
   }, []);
 
-  function updateDocument(updater: (current: DocumentTemplate) => DocumentTemplate) {
+  function updateDocument(updater: (current: DocumentTemplate) => DocumentTemplate, options: DocumentUpdateOptions = {}) {
     setActiveTemplate((current) => {
+      if (options.history !== "skip") {
+        setUndoStack((history) => [...history.slice(-HISTORY_LIMIT + 1), structuredClone(current)]);
+        setRedoStack([]);
+      }
       const nextTemplate = updater({ ...current, updatedAt: new Date().toISOString() });
       activeTemplateRef.current = nextTemplate;
       return nextTemplate;
     });
   }
 
-  function updateElement(id: string, patch: Partial<DocumentElement>) {
+  function updateElement(id: string, patch: Partial<DocumentElement>, options: DocumentUpdateOptions = {}) {
     updateDocument((current) => ({
       ...current,
       elements: current.elements.map((element) =>
         element.id === id ? ({ ...element, ...patch } as DocumentElement) : element,
       ),
-    }));
+    }), options);
   }
 
-  function updateTableLayout(id: string, patch: Partial<TableElement>) {
+  function updateTableLayout(id: string, patch: Partial<TableElement>, options: DocumentUpdateOptions = {}) {
     updateDocument((current) => ({
       ...current,
       elements: current.elements.map((element) => {
@@ -401,7 +490,7 @@ export default function App() {
           ...patch,
         });
       }),
-    }));
+    }), options);
   }
 
   function updateTableCell(tableId: string, row: number, column: number, patch: Partial<NonNullable<TableElement["cells"]>[number]>) {
@@ -429,7 +518,24 @@ export default function App() {
     }));
   }
 
-  function duplicateElement(element: DocumentElement) {
+  function moveSelectedElementByKeyboard(direction: "up" | "down" | "left" | "right", largeStep: boolean) {
+    const element = activeTemplateRef.current.elements.find((item) => item.id === selectedId);
+    if (!element || element.locked) {
+      return;
+    }
+
+    const baseStep = assistSettings.stepMove ? assistSettings.stepMm : 1;
+    const stepMm = largeStep ? baseStep * 10 : baseStep;
+    const deltaX = direction === "left" ? -stepMm : direction === "right" ? stepMm : 0;
+    const deltaY = direction === "up" ? -stepMm : direction === "down" ? stepMm : 0;
+
+    updateElement(element.id, {
+      xMm: Math.max(0, roundMm(element.xMm + deltaX)),
+      yMm: Math.max(0, roundMm(element.yMm + deltaY)),
+    });
+  }
+
+  function duplicateElement(element: DocumentElement, options: DocumentUpdateOptions = {}) {
     const duplicatedElement = {
       ...element,
       id: crypto.randomUUID(),
@@ -446,7 +552,7 @@ export default function App() {
     updateDocument((current) => ({
       ...current,
       elements: [...current.elements, duplicatedElement],
-    }));
+    }), options);
     setSelectedId(duplicatedElement.id);
     if (duplicatedElement.kind === "marker") {
       setMarkerPanelOpen(true);
@@ -575,6 +681,7 @@ export default function App() {
     setSelectedTablePart(null);
     setSelectedTableCell(null);
     setEditingTableCell(null);
+    resetHistory();
     setStatus(draft && templateToOpen === draft.template ? "Wczytano szkic autosave dokumentu" : "Wczytano zapisany dokument");
   }
 
@@ -594,7 +701,9 @@ export default function App() {
     const storedTemplates = await loadTemplates();
     setTemplates(storedTemplates);
     setActiveTemplate(copiedTemplate);
+    activeTemplateRef.current = copiedTemplate;
     setSelectedId(copiedTemplate.elements[0]?.id ?? null);
+    resetHistory();
     setStatus("Skopiowano dokument");
   }
 
@@ -612,7 +721,9 @@ export default function App() {
     if (activeTemplate.id === template.id) {
       const nextTemplate = storedTemplates[0] ?? createTemplate();
       setActiveTemplate(nextTemplate);
+      activeTemplateRef.current = nextTemplate;
       setSelectedId(nextTemplate.elements[0]?.id ?? null);
+      resetHistory();
     }
 
     setStatus("Usunięto zapisany dokument");
@@ -711,6 +822,7 @@ export default function App() {
     setActiveTemplate(freshTemplate);
     activeTemplateRef.current = freshTemplate;
     setSelectedId(freshTemplate.elements[0]?.id ?? null);
+    resetHistory();
     setStatus("Utworzono nowy dokument");
   }
 
@@ -721,6 +833,7 @@ export default function App() {
     setActiveTemplate(freshTemplate);
     activeTemplateRef.current = freshTemplate;
     setSelectedId(freshTemplate.elements[0]?.id ?? null);
+    resetHistory();
     setStatus("Wczytano szablon startowy");
   }
 
@@ -755,13 +868,17 @@ export default function App() {
         tableResize.axis === "column"
           ? (event.clientX - tableResize.startX) / PX_PER_MM / zoom
           : (event.clientY - tableResize.startY) / PX_PER_MM / zoom;
+      if (!tableResize.historyCaptured && Math.abs(delta) > 0.1) {
+        pushUndoSnapshot();
+        tableResize.historyCaptured = true;
+      }
       const minSize = tableResize.axis === "column" ? 5 : 4;
       const sizes = resizeTableSizes(tableResize.originalSizes, tableResize.index, delta, minSize);
 
       if (tableResize.axis === "column") {
-        updateTableLayout(table.id, { columnWidthsMm: sizes });
+        updateTableLayout(table.id, { columnWidthsMm: sizes }, { history: "skip" });
       } else {
-        updateTableLayout(table.id, { rowHeightsMm: sizes });
+        updateTableLayout(table.id, { rowHeightsMm: sizes }, { history: "skip" });
       }
       return;
     }
@@ -771,8 +888,13 @@ export default function App() {
       const deltaY = (event.clientY - drag.startY) / PX_PER_MM / zoom;
       const sourceElement = activeTemplate.elements.find((element) => element.id === drag.id);
 
-      if (drag.duplicateOnDrag && !drag.duplicatedId && sourceElement) {
-        drag.duplicatedId = duplicateElement(sourceElement);
+      if (!drag.historyCaptured && (Math.abs(deltaX) > 0.1 || Math.abs(deltaY) > 0.1)) {
+        pushUndoSnapshot();
+        drag.historyCaptured = true;
+      }
+
+      if (drag.historyCaptured && drag.duplicateOnDrag && !drag.duplicatedId && sourceElement) {
+        drag.duplicatedId = duplicateElement(sourceElement, { history: "skip" });
       }
 
       const movingId = drag.duplicatedId ?? drag.id;
@@ -790,10 +912,14 @@ export default function App() {
         settings: assistSettings,
       });
 
-      updateElement(movingId, {
-        xMm: nextPosition.xMm,
-        yMm: nextPosition.yMm,
-      });
+      updateElement(
+        movingId,
+        {
+          xMm: nextPosition.xMm,
+          yMm: nextPosition.yMm,
+        },
+        { history: "skip" },
+      );
       setActiveGuides(assistSettings.showGuides ? nextPosition.guides : { vertical: [], horizontal: [] });
     }
 
@@ -801,6 +927,10 @@ export default function App() {
       const element = activeTemplate.elements.find((item) => item.id === resize.id);
       const deltaX = (event.clientX - resize.startX) / PX_PER_MM / zoom;
       const deltaY = (event.clientY - resize.startY) / PX_PER_MM / zoom;
+      if (!resize.historyCaptured && (Math.abs(deltaX) > 0.1 || Math.abs(deltaY) > 0.1)) {
+        pushUndoSnapshot();
+        resize.historyCaptured = true;
+      }
       const nextWidth = Math.max(5, roundMm(resize.originalWidth + deltaX));
       const nextHeight =
         element?.kind === "line" || element?.kind === "arrow"
@@ -831,19 +961,23 @@ export default function App() {
             }
           : {};
 
-      updateElement(resize.id, {
-        widthMm:
-          (element?.kind === "line" || element?.kind === "arrow") && element.orientation === "vertical"
-            ? resize.originalWidth
-            : assistedSize.widthMm,
-        heightMm:
-          element?.kind === "line" || element?.kind === "arrow"
-            ? element.orientation === "vertical"
-              ? finalHeight
-              : resize.originalHeight
-            : finalHeight,
-        ...fontPatch,
-      });
+      updateElement(
+        resize.id,
+        {
+          widthMm:
+            (element?.kind === "line" || element?.kind === "arrow") && element.orientation === "vertical"
+              ? resize.originalWidth
+              : assistedSize.widthMm,
+          heightMm:
+            element?.kind === "line" || element?.kind === "arrow"
+              ? element.orientation === "vertical"
+                ? finalHeight
+                : resize.originalHeight
+              : finalHeight,
+          ...fontPatch,
+        },
+        { history: "skip" },
+      );
       setActiveGuides(assistSettings.showGuides ? assistedSize.guides : { vertical: [], horizontal: [] });
     }
   }
@@ -1019,6 +1153,24 @@ export default function App() {
           />
           <div className="top-actions">
             <span>{status}</span>
+            <button
+              type="button"
+              title="Cofnij (Ctrl+Z)"
+              aria-label="Cofnij"
+              disabled={undoStack.length === 0}
+              onClick={undoDocumentChange}
+            >
+              <Undo2 size={15} />
+            </button>
+            <button
+              type="button"
+              title="Ponów (Ctrl+Y)"
+              aria-label="Ponów"
+              disabled={redoStack.length === 0}
+              onClick={redoDocumentChange}
+            >
+              <Redo2 size={15} />
+            </button>
             <label>
               Zoom
               <input
