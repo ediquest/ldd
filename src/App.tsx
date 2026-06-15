@@ -205,6 +205,8 @@ type DocumentUpdateOptions = {
   history?: "push" | "skip";
 };
 
+type PageOrientation = "portrait" | "landscape";
+
 export default function App() {
   const [templates, setTemplates] = useState<DocumentTemplate[]>([]);
   const [activeTemplate, setActiveTemplate] = useState<DocumentTemplate>(() => createTemplate());
@@ -234,6 +236,7 @@ export default function App() {
   const [isCanvasPanning, setIsCanvasPanning] = useState(false);
   const isSpacePanModeRef = useRef(false);
   const zoomRef = useRef(zoom);
+  const selectedIdRef = useRef<string | null>(selectedId);
   const dragRef = useRef<DragState | null>(null);
   const resizeRef = useRef<ResizeState | null>(null);
   const tableResizeRef = useRef<TableResizeState | null>(null);
@@ -267,6 +270,10 @@ export default function App() {
   useEffect(() => {
     zoomRef.current = zoom;
   }, [zoom]);
+
+  useEffect(() => {
+    selectedIdRef.current = selectedId;
+  }, [selectedId]);
 
   useLayoutEffect(() => {
     const anchor = zoomAnchorRef.current;
@@ -468,6 +475,7 @@ export default function App() {
 
     function onWheel(event: WheelEvent) {
       if (!isSpacePanModeRef.current) {
+        adjustSelectedElementWithWheel(event);
         return;
       }
 
@@ -759,12 +767,35 @@ export default function App() {
     if (!preset) {
       return;
     }
+    const orientedSize = orientPageSize(preset, getPageOrientation(activeTemplate.page));
 
     updatePage({
       format: preset.format,
-      widthMm: preset.widthMm,
-      heightMm: preset.heightMm,
+      widthMm: orientedSize.widthMm,
+      heightMm: orientedSize.heightMm,
       marginMm: preset.marginMm,
+    });
+  }
+
+  function changePageOrientation(orientation: PageOrientation) {
+    const currentOrientation = getPageOrientation(activeTemplate.page);
+    if (orientation === currentOrientation) {
+      return;
+    }
+
+    const preset = pagePresets.find((item) => item.format === activeTemplate.page.format);
+    if (preset) {
+      const orientedSize = orientPageSize(preset, orientation);
+      updatePage({
+        widthMm: orientedSize.widthMm,
+        heightMm: orientedSize.heightMm,
+      });
+      return;
+    }
+
+    updatePage({
+      widthMm: activeTemplate.page.heightMm,
+      heightMm: activeTemplate.page.widthMm,
     });
   }
 
@@ -1023,6 +1054,32 @@ export default function App() {
     };
     zoomRef.current = nextZoom;
     setZoom(nextZoom);
+  }
+
+  function adjustSelectedElementWithWheel(event: WheelEvent) {
+    const selectedElement = activeTemplateRef.current.elements.find((element) => element.id === selectedIdRef.current);
+    if (!selectedElement) {
+      return;
+    }
+
+    const direction = event.deltaY > 0 ? -1 : 1;
+
+    if (selectedElement.kind === "text" || selectedElement.kind === "marker") {
+      event.preventDefault();
+      event.stopPropagation();
+      updateElement(selectedElement.id, {
+        fontSize: Math.max(4, Number((selectedElement.fontSize + direction).toFixed(1))),
+      });
+      return;
+    }
+
+    if (selectedElement.kind === "box" || selectedElement.kind === "table") {
+      event.preventDefault();
+      event.stopPropagation();
+      updateElement(selectedElement.id, {
+        borderWidth: Math.max(0, Number(((selectedElement.borderWidth ?? 1) + direction * 0.1).toFixed(1))),
+      } as Partial<DocumentElement>);
+    }
   }
 
   function onPointerMove(event: PointerEvent<HTMLDivElement>) {
@@ -1629,6 +1686,7 @@ export default function App() {
             onUnitChange={setUnit}
             onPageChange={updatePage}
             onPresetChange={applyPagePreset}
+            onOrientationChange={changePageOrientation}
             onBackgroundUpload={(event) => uploadPageBackground(event)}
           />
         </section>
@@ -1813,6 +1871,7 @@ function PageSettingsPanel({
   onUnitChange,
   onPageChange,
   onPresetChange,
+  onOrientationChange,
   onBackgroundUpload,
 }: {
   page: DocumentPage;
@@ -1820,9 +1879,11 @@ function PageSettingsPanel({
   onUnitChange: (unit: MeasurementUnit) => void;
   onPageChange: (patch: Partial<DocumentPage>) => void;
   onPresetChange: (format: PageFormat) => void;
+  onOrientationChange: (orientation: PageOrientation) => void;
   onBackgroundUpload: (event: ChangeEvent<HTMLInputElement>) => void;
 }) {
   const [backgroundOpen, setBackgroundOpen] = useState(false);
+  const orientation = getPageOrientation(page);
 
   return (
     <div className="properties-grid">
@@ -1837,6 +1898,25 @@ function PageSettingsPanel({
           <option value="Custom">Własny</option>
         </select>
       </label>
+      <div className="orientation-toggle wide">
+        <span>Orientacja</span>
+        <div>
+          <button
+            type="button"
+            className={orientation === "portrait" ? "active" : ""}
+            onClick={() => onOrientationChange("portrait")}
+          >
+            Pionowo
+          </button>
+          <button
+            type="button"
+            className={orientation === "landscape" ? "active" : ""}
+            onClick={() => onOrientationChange("landscape")}
+          >
+            Poziomo
+          </button>
+        </div>
+      </div>
       <label className="wide">
         Jednostka
         <select value={unit} onChange={(event) => onUnitChange(event.target.value as MeasurementUnit)}>
@@ -3290,6 +3370,22 @@ function roundMm(value: number) {
 
 function clampZoom(value: number) {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(value.toFixed(2))));
+}
+
+function getPageOrientation(page: Pick<DocumentPage, "widthMm" | "heightMm">): PageOrientation {
+  return page.widthMm > page.heightMm ? "landscape" : "portrait";
+}
+
+function orientPageSize(
+  size: Pick<DocumentPage, "widthMm" | "heightMm">,
+  orientation: PageOrientation,
+): Pick<DocumentPage, "widthMm" | "heightMm"> {
+  const shortSide = Math.min(size.widthMm, size.heightMm);
+  const longSide = Math.max(size.widthMm, size.heightMm);
+
+  return orientation === "landscape"
+    ? { widthMm: longSide, heightMm: shortSide }
+    : { widthMm: shortSide, heightMm: longSide };
 }
 
 function fromMm(valueMm: number, unit: MeasurementUnit) {

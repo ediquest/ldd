@@ -848,6 +848,38 @@ button:disabled {
   grid-column: 1 / -1;
 }
 
+.orientation-toggle {
+  color: #344054;
+  display: grid;
+  gap: 5px;
+  font-size: 12px;
+}
+
+.orientation-toggle div {
+  background: #eef3fb;
+  border: 1px solid #cfd8e6;
+  border-radius: 7px;
+  display: grid;
+  gap: 4px;
+  grid-template-columns: 1fr 1fr;
+  padding: 3px;
+}
+
+.orientation-toggle button {
+  background: transparent;
+  border: 0;
+  border-radius: 5px;
+  color: #344054;
+  min-height: 28px;
+  padding: 5px 8px;
+}
+
+.orientation-toggle button.active {
+  background: #ffffff;
+  box-shadow: 0 1px 3px rgba(22, 34, 51, 0.12);
+  color: #175cd3;
+}
+
 .properties-grid input,
 .properties-grid select,
 .properties-grid textarea {
