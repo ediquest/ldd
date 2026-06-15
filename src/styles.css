@@ -425,6 +425,29 @@ button:disabled {
   padding: 32px 32px 120px;
 }
 
+.canvas-scroll.pan-mode {
+  cursor: grab;
+}
+
+.canvas-scroll.panning {
+  cursor: grabbing;
+  user-select: none;
+}
+
+.canvas-scroll.pan-mode .page,
+.canvas-scroll.pan-mode .document-element,
+.canvas-scroll.pan-mode .resize-handle,
+.canvas-scroll.pan-mode .table-divider {
+  cursor: grab;
+}
+
+.canvas-scroll.panning .page,
+.canvas-scroll.panning .document-element,
+.canvas-scroll.panning .resize-handle,
+.canvas-scroll.panning .table-divider {
+  cursor: grabbing;
+}
+
 .app-shell.marker-panel-visible .canvas-scroll {
   padding-bottom: 420px;
 }
@@ -597,7 +620,6 @@ button:disabled {
   stroke: #172033;
   stroke-linecap: round;
   stroke-linejoin: round;
-  vector-effect: non-scaling-stroke;
 }
 
 .arrow-element .arrow-head.filled {
@@ -632,7 +654,6 @@ button:disabled {
   paint-order: stroke;
   stroke: #ffffff;
   stroke-width: 3px;
-  vector-effect: non-scaling-stroke;
 }
 
 .table-element {
@@ -652,7 +673,7 @@ button:disabled {
   display: flex;
   min-width: 0;
   overflow: hidden;
-  padding: 2px 4px;
+  padding: var(--table-cell-padding-y, 2px) var(--table-cell-padding-x, 4px);
   white-space: pre-wrap;
 }
 
@@ -748,24 +769,24 @@ button:disabled {
   align-items: center;
   display: flex;
   flex-direction: column;
-  gap: 3px;
+  gap: var(--barcode-gap, 3px);
   justify-content: center;
 }
 
 .barcode-element.two-dimensional {
-  gap: 4px;
+  gap: var(--barcode-gap, 4px);
 }
 
 .barcode-lines {
   display: flex;
   flex: 1;
-  gap: 1px;
+  gap: var(--barcode-stripe-gap, 1px);
   width: 100%;
 }
 
 .barcode-stripe {
   height: 100%;
-  min-width: 1px;
+  min-width: var(--barcode-stripe-min-width, 1px);
 }
 
 .barcode-stripe.dark {
@@ -777,7 +798,7 @@ button:disabled {
 }
 
 .barcode-element span {
-  font-size: 9px;
+  font-size: var(--barcode-label-font-size, 9px);
   letter-spacing: 0.12em;
 }
 
@@ -786,7 +807,7 @@ button:disabled {
   display: grid;
   grid-template-columns: repeat(13, 1fr);
   grid-template-rows: repeat(13, 1fr);
-  height: min(100%, 72px);
+  height: min(100%, var(--barcode-matrix-max-size, 72px));
   max-width: 100%;
 }
 

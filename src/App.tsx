@@ -7,8 +7,8 @@ import {
   PointerEvent,
   RefObject,
   ReactNode,
-  WheelEvent as ReactWheelEvent,
   useEffect,
+  useLayoutEffect,
   useMemo,
   useRef,
   useState,
@@ -74,7 +74,7 @@ import type {
 
 const PX_PER_MM = 3.7795275591;
 const MIN_ZOOM = 0.55;
-const MAX_ZOOM = 1.25;
+const MAX_ZOOM = 3;
 const ZOOM_STEP = 0.05;
 
 const units: Record<MeasurementUnit, { label: string; suffix: string; factorMm: number; step: number }> = {
@@ -151,6 +151,23 @@ type TableResizeState = {
   historyCaptured?: boolean;
 };
 
+type CanvasPanState = {
+  pointerId: number;
+  startX: number;
+  startY: number;
+  scrollLeft: number;
+  scrollTop: number;
+  container: HTMLDivElement;
+};
+
+type ZoomAnchorState = {
+  clientX: number;
+  clientY: number;
+  pageX: number;
+  pageY: number;
+  container: HTMLDivElement;
+};
+
 type AssistSettings = {
   snapToElements: boolean;
   showGuides: boolean;
@@ -213,9 +230,16 @@ export default function App() {
   const [starterTemplatesOpen, setStarterTemplatesOpen] = useState(false);
   const [savedTemplatesOpen, setSavedTemplatesOpen] = useState(true);
   const [markerColumnWidths, setMarkerColumnWidths] = useState<MarkerColumnWidths>(() => loadMarkerColumnWidths());
+  const [isSpacePanMode, setIsSpacePanMode] = useState(false);
+  const [isCanvasPanning, setIsCanvasPanning] = useState(false);
+  const isSpacePanModeRef = useRef(false);
+  const zoomRef = useRef(zoom);
   const dragRef = useRef<DragState | null>(null);
   const resizeRef = useRef<ResizeState | null>(null);
   const tableResizeRef = useRef<TableResizeState | null>(null);
+  const canvasPanRef = useRef<CanvasPanState | null>(null);
+  const zoomAnchorRef = useRef<ZoomAnchorState | null>(null);
+  const canvasScrollRef = useRef<HTMLDivElement | null>(null);
   const markerPanelRef = useRef<HTMLElement | null>(null);
   const pageRef = useRef<HTMLDivElement | null>(null);
   const activeTemplateRef = useRef(activeTemplate);
@@ -234,10 +258,39 @@ export default function App() {
     () => activeTemplate.markerColumns?.length ? activeTemplate.markerColumns : defaultMarkerColumns,
     [activeTemplate.markerColumns],
   );
+  const allElementsLocked = activeTemplate.elements.length > 0 && activeTemplate.elements.every((element) => element.locked);
 
   useEffect(() => {
     activeTemplateRef.current = activeTemplate;
   }, [activeTemplate]);
+
+  useEffect(() => {
+    zoomRef.current = zoom;
+  }, [zoom]);
+
+  useLayoutEffect(() => {
+    const anchor = zoomAnchorRef.current;
+    const page = pageRef.current;
+    if (!anchor || !page) {
+      return;
+    }
+
+    const pageRect = page.getBoundingClientRect();
+    const anchoredScreenX = pageRect.left + anchor.pageX * zoom;
+    const anchoredScreenY = pageRect.top + anchor.pageY * zoom;
+    anchor.container.scrollLeft += anchoredScreenX - anchor.clientX;
+    anchor.container.scrollTop += anchoredScreenY - anchor.clientY;
+
+    const canvasPan = canvasPanRef.current;
+    if (canvasPan?.container === anchor.container) {
+      canvasPan.startX = anchor.clientX;
+      canvasPan.startY = anchor.clientY;
+      canvasPan.scrollLeft = anchor.container.scrollLeft;
+      canvasPan.scrollTop = anchor.container.scrollTop;
+    }
+
+    zoomAnchorRef.current = null;
+  }, [zoom]);
 
   function clearAutosaveTimer() {
     if (!autosaveTimerRef.current) {
@@ -263,6 +316,11 @@ export default function App() {
   function pushUndoSnapshot(template: DocumentTemplate = activeTemplateRef.current) {
     setUndoStack((current) => [...current.slice(-HISTORY_LIMIT + 1), structuredClone(template)]);
     setRedoStack([]);
+  }
+
+  function setSpacePanMode(active: boolean) {
+    isSpacePanModeRef.current = active;
+    setIsSpacePanMode(active);
   }
 
   function applyTemplateState(template: DocumentTemplate) {
@@ -402,12 +460,45 @@ export default function App() {
   }, [markerColumnWidths]);
 
   useEffect(() => {
-    function onKeyDown(event: KeyboardEvent) {
+    const container = canvasScrollRef.current;
+    if (!container) {
+      return;
+    }
+    const scrollContainer = container;
+
+    function onWheel(event: WheelEvent) {
+      if (!isSpacePanModeRef.current) {
+        return;
+      }
+
+      event.preventDefault();
+      event.stopPropagation();
+      zoomCanvasAtPointer(scrollContainer, event.clientX, event.clientY, event.deltaY);
+    }
+
+    scrollContainer.addEventListener("wheel", onWheel, { passive: false });
+    return () => scrollContainer.removeEventListener("wheel", onWheel);
+  }, []);
+
+  useEffect(() => {
+    function isEditableTarget() {
       const activeElement = document.activeElement;
-      const isEditing =
+      return (
         activeElement instanceof HTMLInputElement ||
         activeElement instanceof HTMLTextAreaElement ||
-        activeElement instanceof HTMLSelectElement;
+        activeElement instanceof HTMLSelectElement ||
+        activeElement instanceof HTMLElement && activeElement.isContentEditable
+      );
+    }
+
+    function onKeyDown(event: KeyboardEvent) {
+      const isEditing = isEditableTarget();
+
+      if (event.code === "Space" && !isEditing && !event.ctrlKey && !event.metaKey && !event.altKey) {
+        event.preventDefault();
+        setSpacePanMode(true);
+        return;
+      }
 
       if (event.key === "Delete" && selectedId && !isEditing) {
         event.preventDefault();
@@ -443,8 +534,26 @@ export default function App() {
       }
     }
 
+    function onKeyUp(event: KeyboardEvent) {
+      if (event.code === "Space") {
+        setSpacePanMode(false);
+        stopCanvasPan();
+      }
+    }
+
+    function onWindowBlur() {
+      setSpacePanMode(false);
+      stopCanvasPan();
+    }
+
     window.addEventListener("keydown", onKeyDown);
-    return () => window.removeEventListener("keydown", onKeyDown);
+    window.addEventListener("keyup", onKeyUp);
+    window.addEventListener("blur", onWindowBlur);
+    return () => {
+      window.removeEventListener("keydown", onKeyDown);
+      window.removeEventListener("keyup", onKeyUp);
+      window.removeEventListener("blur", onWindowBlur);
+    };
   }, [assistSettings.stepMm, assistSettings.stepMove, selectedId]);
 
   useEffect(() => {
@@ -577,6 +686,23 @@ export default function App() {
   function toggleElementLock(id: string) {
     const element = activeTemplate.elements.find((item) => item.id === id);
     updateElement(id, { locked: !element?.locked });
+  }
+
+  function toggleAllElementLocks() {
+    if (activeTemplate.elements.length === 0) {
+      return;
+    }
+
+    const locked = !allElementsLocked;
+    updateDocument((current) => ({
+      ...current,
+      elements: current.elements.map((element) => ({ ...element, locked })),
+    }));
+    setSelectedId(null);
+    setSelectedTablePart(null);
+    setSelectedTableCell(null);
+    setEditingTableCell(null);
+    setStatus(locked ? "Zablokowano wszystkie elementy" : "Odblokowano wszystkie elementy");
   }
 
   function updatePage(patch: Partial<DocumentPage>) {
@@ -855,49 +981,61 @@ export default function App() {
     });
   }
 
-  function zoomCanvas(event: ReactWheelEvent<HTMLDivElement>) {
-    const selectedElement = activeTemplateRef.current.elements.find((element) => element.id === selectedId);
-    const direction = event.deltaY > 0 ? -1 : 1;
-
-    if (selectedElement?.kind === "text" || selectedElement?.kind === "marker") {
-      event.preventDefault();
-      updateElement(selectedElement.id, {
-        fontSize: Math.max(4, Number((selectedElement.fontSize + direction).toFixed(1))),
-      });
-      return;
-    }
-
-    if (selectedElement?.kind === "box" || selectedElement?.kind === "table") {
-      event.preventDefault();
-      updateElement(selectedElement.id, {
-        borderWidth: Math.max(0, Number(((selectedElement.borderWidth ?? 1) + direction * 0.1).toFixed(1))),
-      } as Partial<DocumentElement>);
-      return;
-    }
-
-    const container = event.currentTarget;
-    const canScrollVertically = container.scrollHeight > container.clientHeight;
-    const canScrollHorizontally = container.scrollWidth > container.clientWidth;
-    const canScrollDown = event.deltaY > 0 && container.scrollTop + container.clientHeight < container.scrollHeight;
-    const canScrollUp = event.deltaY < 0 && container.scrollTop > 0;
-    const canScrollRight = event.deltaX > 0 && container.scrollLeft + container.clientWidth < container.scrollWidth;
-    const canScrollLeft = event.deltaX < 0 && container.scrollLeft > 0;
-
-    if (
-      (canScrollVertically && (canScrollDown || canScrollUp)) ||
-      (canScrollHorizontally && (canScrollRight || canScrollLeft))
-    ) {
-      return;
-    }
-
+  function startCanvasPan(event: PointerEvent<HTMLElement>, container: HTMLDivElement) {
     event.preventDefault();
-    setZoom((current) => clampZoom(current + direction * ZOOM_STEP));
+    setContextMenu(null);
+    stopInteractions();
+    container.setPointerCapture(event.pointerId);
+    canvasPanRef.current = {
+      pointerId: event.pointerId,
+      startX: event.clientX,
+      startY: event.clientY,
+      scrollLeft: container.scrollLeft,
+      scrollTop: container.scrollTop,
+      container,
+    };
+    setIsCanvasPanning(true);
+  }
+
+  function zoomCanvasAtPointer(container: HTMLDivElement, clientX: number, clientY: number, deltaY: number) {
+    const page = pageRef.current;
+    if (!page) {
+      return;
+    }
+
+    const pageRect = page.getBoundingClientRect();
+    const currentZoom = zoomRef.current;
+    const pageX = (clientX - pageRect.left) / currentZoom;
+    const pageY = (clientY - pageRect.top) / currentZoom;
+    const direction = deltaY > 0 ? -1 : 1;
+    const nextZoom = clampZoom(currentZoom + direction * ZOOM_STEP);
+
+    if (nextZoom === currentZoom) {
+      return;
+    }
+
+    zoomAnchorRef.current = {
+      clientX,
+      clientY,
+      pageX,
+      pageY,
+      container,
+    };
+    zoomRef.current = nextZoom;
+    setZoom(nextZoom);
   }
 
   function onPointerMove(event: PointerEvent<HTMLDivElement>) {
+    const canvasPan = canvasPanRef.current;
     const tableResize = tableResizeRef.current;
     const drag = dragRef.current;
     const resize = resizeRef.current;
+
+    if (canvasPan) {
+      canvasPan.container.scrollLeft = canvasPan.scrollLeft - (event.clientX - canvasPan.startX);
+      canvasPan.container.scrollTop = canvasPan.scrollTop - (event.clientY - canvasPan.startY);
+      return;
+    }
 
     if (tableResize) {
       const table = activeTemplate.elements.find(
@@ -1029,7 +1167,17 @@ export default function App() {
     dragRef.current = null;
     resizeRef.current = null;
     tableResizeRef.current = null;
+    stopCanvasPan();
     setActiveGuides({ vertical: [], horizontal: [] });
+  }
+
+  function stopCanvasPan() {
+    const canvasPan = canvasPanRef.current;
+    if (canvasPan?.container.hasPointerCapture(canvasPan.pointerId)) {
+      canvasPan.container.releasePointerCapture(canvasPan.pointerId);
+    }
+    canvasPanRef.current = null;
+    setIsCanvasPanning(false);
   }
 
   function uploadImage(event: ChangeEvent<HTMLInputElement>) {
@@ -1065,6 +1213,10 @@ export default function App() {
       });
     };
     reader.readAsDataURL(file);
+  }
+
+  function focusCanvasScroll() {
+    canvasScrollRef.current?.focus({ preventScroll: true });
   }
 
   return (
@@ -1214,6 +1366,15 @@ export default function App() {
             >
               <Redo2 size={15} />
             </button>
+            <button
+              type="button"
+              title={allElementsLocked ? "Odblokuj wszystkie elementy" : "Zablokuj wszystkie elementy"}
+              aria-label={allElementsLocked ? "Odblokuj wszystkie elementy" : "Zablokuj wszystkie elementy"}
+              disabled={activeTemplate.elements.length === 0}
+              onClick={toggleAllElementLocks}
+            >
+              {allElementsLocked ? <Unlock size={15} /> : <Lock size={15} />}
+            </button>
             <label>
               Zoom
               <input
@@ -1222,7 +1383,29 @@ export default function App() {
                 max={MAX_ZOOM}
                 step={ZOOM_STEP}
                 value={zoom}
-                onChange={(event) => setZoom(Number(event.target.value))}
+                onChange={(event) => {
+                  const nextZoom = Number(event.target.value);
+                  zoomRef.current = nextZoom;
+                  setZoom(nextZoom);
+                }}
+                onKeyDown={(event) => {
+                  if (event.key === " ") {
+                    event.preventDefault();
+                    event.currentTarget.blur();
+                    focusCanvasScroll();
+                    setSpacePanMode(true);
+                  }
+                }}
+                onKeyUp={(event) => {
+                  if (event.key === "Enter" || event.key === " ") {
+                    event.currentTarget.blur();
+                    focusCanvasScroll();
+                  }
+                }}
+                onPointerUp={(event) => {
+                  event.currentTarget.blur();
+                  focusCanvasScroll();
+                }}
               />
             </label>
             <button onClick={printDocument}>Drukuj</button>
@@ -1232,12 +1415,18 @@ export default function App() {
         </header>
 
         <div
-          className="canvas-scroll"
+          ref={canvasScrollRef}
+          tabIndex={-1}
+          className={`canvas-scroll ${isSpacePanMode ? "pan-mode" : ""} ${isCanvasPanning ? "panning" : ""}`}
           onPointerMove={onPointerMove}
           onPointerUp={stopInteractions}
           onPointerLeave={stopInteractions}
-          onWheel={zoomCanvas}
           onPointerDown={(event) => {
+            if (isSpacePanMode) {
+              startCanvasPan(event, event.currentTarget);
+              return;
+            }
+
             if (event.target !== event.currentTarget) {
               return;
             }
@@ -1259,6 +1448,10 @@ export default function App() {
             } as CSSProperties}
             onContextMenu={openContextMenu}
             onPointerDown={() => {
+              if (isSpacePanMode) {
+                return;
+              }
+
               setSelectedId(null);
               setSelectedTablePart(null);
               setSelectedTableCell(null);
@@ -1319,6 +1512,14 @@ export default function App() {
                 }}
                 onDragStart={(event) => {
                   event.stopPropagation();
+                  if (isSpacePanMode) {
+                    const container = canvasScrollRef.current;
+                    if (container) {
+                      startCanvasPan(event, container);
+                    }
+                    return;
+                  }
+
                   setSelectedId(element.id);
                   if (element.kind !== "table") {
                     setSelectedTablePart(null);
@@ -1342,6 +1543,14 @@ export default function App() {
                 }}
                 onResizeStart={(event) => {
                   event.stopPropagation();
+                  if (isSpacePanMode) {
+                    const container = canvasScrollRef.current;
+                    if (container) {
+                      startCanvasPan(event, container);
+                    }
+                    return;
+                  }
+
                   setSelectedId(element.id);
                   if (element.locked) {
                     return;
@@ -1361,6 +1570,14 @@ export default function App() {
                 onToggleLock={() => toggleElementLock(element.id)}
                 onTableDividerPointerDown={(event, table, axis, index) => {
                   event.stopPropagation();
+                  if (isSpacePanMode) {
+                    const container = canvasScrollRef.current;
+                    if (container) {
+                      startCanvasPan(event, container);
+                    }
+                    return;
+                  }
+
                   setSelectedId(table.id);
                   if (table.locked) {
                     return;
@@ -1844,7 +2061,7 @@ function ElementContent({
       <div
         className="text-element"
         style={{
-          fontSize: element.fontSize,
+          fontSize: element.fontSize * zoom,
           fontWeight: element.fontWeight,
           textAlign: element.align,
           color: element.color ?? "#172033",
@@ -1865,7 +2082,7 @@ function ElementContent({
       <div
         className="marker-element"
         style={{
-          fontSize: element.fontSize,
+          fontSize: element.fontSize * zoom,
           fontWeight: element.fontWeight,
         }}
       >
@@ -1875,7 +2092,7 @@ function ElementContent({
   }
 
   if (element.kind === "box") {
-    return <div className="box-element" style={{ borderWidth: element.borderWidth, background: element.fill }} />;
+    return <div className="box-element" style={{ borderWidth: element.borderWidth * zoom, background: element.fill }} />;
   }
 
   if (element.kind === "line") {
@@ -1884,8 +2101,8 @@ function ElementContent({
         <span
           style={
             element.orientation === "vertical"
-              ? { width: element.borderWidth }
-              : { height: element.borderWidth }
+              ? { width: element.borderWidth * zoom }
+              : { height: element.borderWidth * zoom }
           }
         />
       </div>
@@ -1904,8 +2121,10 @@ function ElementContent({
           style={{
             gridTemplateColumns: columnWidths.map((width) => `${width * PX_PER_MM * zoom}px`).join(" "),
             gridTemplateRows: rowHeights.map((height) => `${height * PX_PER_MM * zoom}px`).join(" "),
-            fontSize: table.fontSize,
-            "--table-border-width": `${table.borderWidth ?? 1}px`,
+            fontSize: table.fontSize * zoom,
+            "--table-border-width": `${(table.borderWidth ?? 1) * zoom}px`,
+            "--table-cell-padding-y": `${2 * zoom}px`,
+            "--table-cell-padding-x": `${4 * zoom}px`,
           } as CSSProperties}
         >
           {Array.from({ length: table.rows * table.columns }).map((_, index) => {
@@ -1978,11 +2197,22 @@ function ElementContent({
   }
 
   if (element.kind === "arrow") {
-    return <ArrowContent arrow={element} />;
+    return <ArrowContent arrow={element} zoom={zoom} />;
   }
 
   return (
-    <div className={isTwoDimensionalBarcode(element.symbology) ? "barcode-element two-dimensional" : "barcode-element"}>
+    <div
+      className={isTwoDimensionalBarcode(element.symbology) ? "barcode-element two-dimensional" : "barcode-element"}
+      style={
+        {
+          "--barcode-gap": `${(isTwoDimensionalBarcode(element.symbology) ? 4 : 3) * zoom}px`,
+          "--barcode-stripe-gap": `${zoom}px`,
+          "--barcode-stripe-min-width": `${zoom}px`,
+          "--barcode-label-font-size": `${9 * zoom}px`,
+          "--barcode-matrix-max-size": `${72 * zoom}px`,
+        } as CSSProperties
+      }
+    >
       {isTwoDimensionalBarcode(element.symbology) ? (
         <div className={`barcode-matrix ${element.symbology}`} aria-hidden="true">
           {createMatrixPattern(element.value, element.symbology).map((cell, index) => (
@@ -2616,7 +2846,7 @@ function MarkerPanel({
   );
 }
 
-function ArrowContent({ arrow }: { arrow: Extract<DocumentElement, { kind: "arrow" }> }) {
+function ArrowContent({ arrow, zoom }: { arrow: Extract<DocumentElement, { kind: "arrow" }>; zoom: number }) {
   const isVertical = arrow.orientation === "vertical";
   const lengthMm = isVertical ? arrow.heightMm : arrow.widthMm;
   const label = arrow.labelText?.trim() ? arrow.labelText : formatMeasurement(lengthMm, arrow.labelUnit);
@@ -2674,7 +2904,7 @@ function ArrowContent({ arrow }: { arrow: Extract<DocumentElement, { kind: "arro
           style={{
             left: `${(adjustedLabelX / labelWidth) * 100}%`,
             top: `${(adjustedLabelY / labelHeight) * 100}%`,
-            fontSize: arrow.labelFontSize ?? 7,
+            fontSize: (arrow.labelFontSize ?? 7) * zoom,
           }}
         >
           {label}
