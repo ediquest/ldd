@@ -34,12 +34,14 @@ import {
   ArrowRight,
   ChevronDown,
   ChevronUp,
+  ClipboardPaste,
   FileText,
   Image,
   LayoutTemplate,
   Lock,
   Copy,
   Redo2,
+  ScanText,
   Minus,
   Pencil,
   Plus,
@@ -191,6 +193,38 @@ type ContextMenuState = {
   pageY: number;
 } | null;
 
+type OcrCandidate = {
+  id: string;
+  text: string;
+  confidence: number;
+  xMm: number;
+  yMm: number;
+  widthMm: number;
+  heightMm: number;
+  selected: boolean;
+  fontSize?: number;
+  fontWeight?: "400" | "700";
+  align?: "left" | "center" | "right";
+};
+
+type OcrLayoutShape = {
+  id: string;
+  kind: "line" | "box";
+  label: string;
+  xMm: number;
+  yMm: number;
+  widthMm: number;
+  heightMm: number;
+  selected: boolean;
+};
+
+type OcrImage = {
+  src: string;
+  name: string;
+  widthPx: number;
+  heightPx: number;
+};
+
 const defaultMarkerColumnWidths: MarkerColumnWidths = {
   code: 80,
   data: 180,
@@ -228,6 +262,7 @@ export default function App() {
   });
   const [activeGuides, setActiveGuides] = useState<ActiveGuides>({ vertical: [], horizontal: [] });
   const [contextMenu, setContextMenu] = useState<ContextMenuState>(null);
+  const [ocrImportOpen, setOcrImportOpen] = useState(false);
   const [markerPanelOpen, setMarkerPanelOpen] = useState(true);
   const [starterTemplatesOpen, setStarterTemplatesOpen] = useState(false);
   const [savedTemplatesOpen, setSavedTemplatesOpen] = useState(true);
@@ -1272,6 +1307,88 @@ export default function App() {
     reader.readAsDataURL(file);
   }
 
+  function applyOcrCandidates(candidates: OcrCandidate[], shapes: OcrLayoutShape[] = []) {
+    const selectedCandidates = candidates.filter((candidate) => candidate.selected && candidate.text.trim());
+    const selectedShapes = shapes.filter((shape) => shape.selected);
+    if (selectedCandidates.length === 0 && selectedShapes.length === 0) {
+      setStatus("Nie wybrano elementow OCR");
+      return;
+    }
+
+    const importedTextElements = selectedCandidates.map(
+      (candidate, index): Extract<DocumentElement, { kind: "text" }> => ({
+        id: crypto.randomUUID(),
+        kind: "text",
+        name: `OCR tekst ${index + 1}`,
+        xMm: candidate.xMm,
+        yMm: candidate.yMm,
+        widthMm: Math.max(8, candidate.widthMm),
+        heightMm: Math.max(4, candidate.heightMm),
+        rotation: 0,
+        text: candidate.text,
+        fontSize: candidate.fontSize ?? clamp(roundMm(candidate.heightMm * 2.45), 5, 14),
+        fontWeight: candidate.fontWeight ?? "400",
+        align: candidate.align ?? "left",
+        color: "#172033",
+        orientation: "horizontal",
+        verticalDirection: "clockwise",
+      }),
+    );
+    const importedShapeElements = selectedShapes.map((shape, index): DocumentElement => {
+      if (shape.kind === "box") {
+        return {
+          id: crypto.randomUUID(),
+          kind: "box",
+          name: `OCR ramka ${index + 1}`,
+          xMm: shape.xMm,
+          yMm: shape.yMm,
+          widthMm: Math.max(2, shape.widthMm),
+          heightMm: Math.max(2, shape.heightMm),
+          rotation: 0,
+          borderWidth: 1,
+          fill: "transparent",
+        };
+      }
+
+      return {
+        id: crypto.randomUUID(),
+        kind: "line",
+        name: `OCR linia ${index + 1}`,
+        xMm: shape.xMm,
+        yMm: shape.yMm,
+        widthMm: Math.max(1, shape.widthMm),
+        heightMm: Math.max(1, shape.heightMm),
+        rotation: 0,
+        borderWidth: 1,
+        orientation: shape.widthMm >= shape.heightMm ? "horizontal" : "vertical",
+      };
+    });
+    const importedElements = [...importedShapeElements, ...importedTextElements];
+
+    updateDocument((current) => ({ ...current, elements: [...current.elements, ...importedElements] }));
+    setSelectedId(importedElements[0]?.id ?? null);
+    setSelectedTablePart(null);
+    setSelectedTableCell(null);
+    setEditingTableCell(null);
+    setOcrImportOpen(false);
+    setStatus(`Dodano elementy OCR: ${importedElements.length}`);
+  }
+
+  function setOcrImageAsBackground(image: OcrImage, opacity = 1) {
+    updatePage({
+      background: {
+        src: image.src,
+        xMm: 0,
+        yMm: 0,
+        widthMm: activeTemplate.page.widthMm,
+        heightMm: activeTemplate.page.heightMm,
+        opacity,
+      },
+    });
+    setOcrImportOpen(false);
+    setStatus("Ustawiono obraz jako tlo dokumentu");
+  }
+
   function focusCanvasScroll() {
     canvasScrollRef.current?.focus({ preventScroll: true });
   }
@@ -1301,6 +1418,9 @@ export default function App() {
           </button>
           <button className="secondary-button" onClick={() => void persistTemplate()}>
             <Save size={16} /> Zapisz lokalnie
+          </button>
+          <button className="secondary-button" onClick={() => setOcrImportOpen(true)}>
+            <ScanText size={16} /> Odczytaj ze zdjecia
           </button>
         </section>
 
@@ -1677,6 +1797,16 @@ export default function App() {
         />
       )}
 
+      {ocrImportOpen && (
+        <OcrImportDialog
+          page={activeTemplate.page}
+          onClose={() => setOcrImportOpen(false)}
+          onApplyCandidates={applyOcrCandidates}
+          onUseAsBackground={setOcrImageAsBackground}
+          onApplyOrientation={changePageOrientation}
+        />
+      )}
+
       <aside className="right-panel">
         <section className="properties-section">
           <h2>Dokument</h2>
@@ -1861,6 +1991,341 @@ function AssistSettingsPanel({
           <option value={10}>10 mm</option>
         </select>
       </label>
+    </div>
+  );
+}
+
+function OcrImportDialog({
+  page,
+  onClose,
+  onApplyCandidates,
+  onUseAsBackground,
+  onApplyOrientation,
+}: {
+  page: DocumentPage;
+  onClose: () => void;
+  onApplyCandidates: (candidates: OcrCandidate[], shapes?: OcrLayoutShape[]) => void;
+  onUseAsBackground: (image: OcrImage, opacity?: number) => void;
+  onApplyOrientation: (orientation: PageOrientation) => void;
+}) {
+  const [image, setImage] = useState<OcrImage | null>(null);
+  const [candidates, setCandidates] = useState<OcrCandidate[]>([]);
+  const [shapes, setShapes] = useState<OcrLayoutShape[]>([]);
+  const [detectedOrientation, setDetectedOrientation] = useState<PageOrientation | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState("");
+  const [error, setError] = useState("");
+  const selectedCount = candidates.filter((candidate) => candidate.selected).length;
+  const selectedShapeCount = shapes.filter((shape) => shape.selected).length;
+  const averageConfidence =
+    candidates.length === 0
+      ? 0
+      : Math.round(candidates.reduce((sum, candidate) => sum + candidate.confidence, 0) / candidates.length);
+  const pageOrientation = getPageOrientation(page);
+  const orientationMismatch = detectedOrientation !== null && detectedOrientation !== pageOrientation;
+
+  useEffect(() => {
+    function onPaste(event: ClipboardEvent) {
+      const file = Array.from(event.clipboardData?.files ?? []).find((item) => item.type.startsWith("image/"));
+      if (file) {
+        event.preventDefault();
+        void loadImageFile(file);
+      }
+    }
+
+    window.addEventListener("paste", onPaste);
+    return () => window.removeEventListener("paste", onPaste);
+  }, []);
+
+  async function loadImageFile(file: File) {
+    setError("");
+    setProgress("");
+    setCandidates([]);
+    setShapes([]);
+    setDetectedOrientation(null);
+
+    try {
+      const src = await fileToDataUrl(file);
+      const size = await getImageSize(src);
+      setDetectedOrientation(getImageOrientation(size.width, size.height));
+      setImage({
+        src,
+        name: file.name || "Wklejony obraz",
+        widthPx: size.width,
+        heightPx: size.height,
+      });
+    } catch {
+      setError("Nie udalo sie wczytac obrazu");
+    }
+  }
+
+  async function runOcr() {
+    if (!image) {
+      return;
+    }
+
+    setBusy(true);
+    setError("");
+    setProgress(orientationMismatch ? "Orientacja obrazu i dokumentu sie rozni. Przygotowanie OCR." : "Przygotowanie OCR");
+
+    try {
+      const detectedShapes = await detectLayoutShapes(image, page);
+      setShapes(detectedShapes);
+      const { createWorker } = await import("tesseract.js");
+      const worker = await createWorker("pol+eng", undefined, {
+        logger: (message) => {
+          if (message.status) {
+            setProgress(`${message.status} ${Math.round(message.progress * 100)}%`);
+          }
+        },
+      });
+      const result = await worker
+        .recognize(image.src, {}, { text: true, blocks: true, layoutBlocks: true, tsv: true })
+        .finally(() => worker.terminate());
+      const largeTextCandidates = await detectLargeTextCandidates(image, page, result.data);
+      const nextCandidates = mergeOcrCandidates([
+        ...extractOcrCandidates(result.data, image, page),
+        ...largeTextCandidates,
+      ]);
+      setCandidates(nextCandidates);
+      setShapes((current) => filterLayoutShapes(current, nextCandidates, page));
+      setProgress(
+        nextCandidates.length || detectedShapes.length
+          ? `Znaleziono: teksty ${nextCandidates.length}, linie/ramki ${detectedShapes.length}`
+          : "Nie znaleziono tekstu ani ukladu",
+      );
+    } catch {
+      setError("OCR nie zakonczyl sie poprawnie. Mozesz uzyc obrazu jako tla i odtworzyc dokument recznie.");
+      setProgress("");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  function toggleCandidate(id: string) {
+    setCandidates((current) =>
+      current.map((candidate) => (candidate.id === id ? { ...candidate, selected: !candidate.selected } : candidate)),
+    );
+  }
+
+  function toggleShape(id: string) {
+    setShapes((current) => current.map((shape) => (shape.id === id ? { ...shape, selected: !shape.selected } : shape)));
+  }
+
+  function setAllCandidates(selected: boolean) {
+    setCandidates((current) => current.map((candidate) => ({ ...candidate, selected })));
+    setShapes((current) => current.map((shape) => ({ ...shape, selected })));
+  }
+
+  return (
+    <div className="modal-backdrop" role="presentation">
+      <section className="ocr-dialog" role="dialog" aria-modal="true" aria-label="Odczytaj dokument ze zdjecia">
+        <header className="ocr-header">
+          <div>
+            <strong>Odczytaj dokument ze zdjecia</strong>
+            <span>Import lokalny w przegladarce: plik, przeciaganie albo wklejenie obrazu.</span>
+          </div>
+          <button type="button" className="icon-button" aria-label="Zamknij" onClick={onClose}>
+            x
+          </button>
+        </header>
+
+        <div className="ocr-body">
+          <div
+            className="ocr-dropzone"
+            onDragOver={(event) => event.preventDefault()}
+            onDrop={(event) => {
+              event.preventDefault();
+              const file = Array.from(event.dataTransfer.files).find((item) => item.type.startsWith("image/"));
+              if (file) {
+                void loadImageFile(file);
+              }
+            }}
+          >
+            <ClipboardPaste size={22} />
+            <strong>{image ? image.name : "Dodaj lub wklej zdjecie dokumentu"}</strong>
+            <span>Przeciagnij obraz tutaj albo uzyj Ctrl+V.</span>
+            <label className="secondary-button ocr-file-button">
+              Wybierz plik
+              <input
+                type="file"
+                accept="image/*"
+                onChange={(event) => {
+                  const file = event.target.files?.[0];
+                  if (file) {
+                    void loadImageFile(file);
+                  }
+                }}
+              />
+            </label>
+          </div>
+
+          {detectedOrientation && (
+            <div className={orientationMismatch ? "ocr-orientation-warning" : "ocr-orientation-info"}>
+              <span>
+                Wykryto obraz: {formatOrientationLabel(detectedOrientation)}. Dokument: {formatOrientationLabel(pageOrientation)}.
+              </span>
+              {orientationMismatch && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    onApplyOrientation(detectedOrientation);
+                    setCandidates([]);
+                    setShapes([]);
+                    setProgress("Dopasowano orientacje dokumentu. Uruchom OCR ponownie.");
+                  }}
+                >
+                  Ustaw dokument {detectedOrientation === "landscape" ? "poziomo" : "pionowo"}
+                </button>
+              )}
+            </div>
+          )}
+
+          <div className="ocr-preview-grid">
+            <div className="ocr-preview-panel">
+              <div className="ocr-panel-title">Oryginal</div>
+              {image ? (
+                <img className="ocr-source-image" src={image.src} alt="Importowany dokument" />
+              ) : (
+                <div className="ocr-empty-state">Brak obrazu</div>
+              )}
+            </div>
+
+            <div className="ocr-preview-panel">
+              <div className="ocr-panel-title">Podglad OCR</div>
+              <div
+                className="ocr-document-preview"
+                style={{ aspectRatio: `${page.widthMm} / ${page.heightMm}` }}
+              >
+                {image && <img src={image.src} alt="" />}
+                {shapes.map((shape) => (
+                  <button
+                    key={shape.id}
+                    type="button"
+                    className={`ocr-shape ${shape.kind} ${shape.selected ? "selected" : ""}`}
+                    style={{
+                      left: `${(shape.xMm / page.widthMm) * 100}%`,
+                      top: `${(shape.yMm / page.heightMm) * 100}%`,
+                      width: `${(shape.widthMm / page.widthMm) * 100}%`,
+                      height: `${(shape.heightMm / page.heightMm) * 100}%`,
+                    }}
+                    title={shape.label}
+                    onClick={() => toggleShape(shape.id)}
+                  />
+                ))}
+                {candidates.map((candidate) => (
+                  <button
+                    key={candidate.id}
+                    type="button"
+                    className={candidate.selected ? "ocr-candidate selected" : "ocr-candidate"}
+                    style={{
+                      left: `${(candidate.xMm / page.widthMm) * 100}%`,
+                      top: `${(candidate.yMm / page.heightMm) * 100}%`,
+                      width: `${(candidate.widthMm / page.widthMm) * 100}%`,
+                      height: `${(candidate.heightMm / page.heightMm) * 100}%`,
+                      fontSize: candidate.fontSize ? `${Math.min(26, candidate.fontSize * 0.42)}px` : undefined,
+                      fontWeight: candidate.fontWeight,
+                      textAlign: candidate.align,
+                    }}
+                    title={`${candidate.text} (${Math.round(candidate.confidence)}%)`}
+                    onClick={() => toggleCandidate(candidate.id)}
+                  >
+                    {candidate.text}
+                  </button>
+                ))}
+              </div>
+            </div>
+          </div>
+
+          <aside className="ocr-summary">
+            <div className="ocr-summary-top">
+              <strong>Podsumowanie</strong>
+              <span>
+                Teksty {candidates.length}, uklad {shapes.length}, wybrane {selectedCount + selectedShapeCount}
+                {candidates.length > 0 ? `, pewnosc srednia ${averageConfidence}%` : ""}
+              </span>
+            </div>
+
+            <div className="ocr-actions">
+              <button type="button" className="primary-button" disabled={!image || busy} onClick={() => void runOcr()}>
+                {busy ? "Odczytywanie..." : "Odczytaj dokument"}
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={(candidates.length === 0 && shapes.length === 0) || (selectedCount === 0 && selectedShapeCount === 0)}
+                onClick={() => onApplyCandidates(candidates, shapes)}
+              >
+                Zastosuj wybrane elementy
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={!image}
+                onClick={() => image && onUseAsBackground(image, 1)}
+              >
+                Ustaw obraz jako tlo 100%
+              </button>
+              <button
+                type="button"
+                className="secondary-button"
+                disabled={!image || (selectedCount === 0 && selectedShapeCount === 0)}
+                onClick={() => {
+                  if (image) {
+                    onUseAsBackground(image, 1);
+                    onApplyCandidates(candidates, shapes);
+                  }
+                }}
+              >
+                Tlo + wybrane elementy
+              </button>
+            </div>
+
+            <div className="ocr-selection-actions">
+              <button type="button" disabled={candidates.length === 0} onClick={() => setAllCandidates(true)}>
+                Zaznacz wszystko
+              </button>
+              <button type="button" disabled={candidates.length === 0} onClick={() => setAllCandidates(false)}>
+                Odznacz wszystko
+              </button>
+            </div>
+
+            {progress && <p className="ocr-progress">{progress}</p>}
+            {error && <p className="ocr-error">{error}</p>}
+
+            <div className="ocr-candidate-list">
+              {candidates.length === 0 && shapes.length === 0 ? (
+                <p className="muted">Po OCR pojawi sie tutaj lista znalezionych tekstow, ramek i linii.</p>
+              ) : (
+                <>
+                  {shapes.map((shape) => (
+                    <label key={shape.id} className="ocr-result-row">
+                      <input type="checkbox" checked={shape.selected} onChange={() => toggleShape(shape.id)} />
+                      <span>
+                        <strong>{shape.label}</strong>
+                        <small>{shape.kind === "box" ? "Ramka" : "Linia"}</small>
+                      </span>
+                    </label>
+                  ))}
+                  {candidates.map((candidate) => (
+                    <label key={candidate.id} className="ocr-result-row">
+                      <input
+                        type="checkbox"
+                        checked={candidate.selected}
+                        onChange={() => toggleCandidate(candidate.id)}
+                      />
+                      <span>
+                        <strong>{candidate.text}</strong>
+                        <small>Pewnosc {Math.round(candidate.confidence)}%</small>
+                      </span>
+                    </label>
+                  ))}
+                </>
+              )}
+            </div>
+          </aside>
+        </div>
+      </section>
     </div>
   );
 }
@@ -3368,12 +3833,865 @@ function roundMm(value: number) {
   return Math.round(value * 2) / 2;
 }
 
+function clamp(value: number, min: number, max: number) {
+  return Math.min(max, Math.max(min, value));
+}
+
 function clampZoom(value: number) {
   return Math.min(MAX_ZOOM, Math.max(MIN_ZOOM, Number(value.toFixed(2))));
 }
 
+function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(String(reader.result));
+    reader.onerror = () => reject(reader.error);
+    reader.readAsDataURL(file);
+  });
+}
+
+function getImageSize(src: string): Promise<{ width: number; height: number }> {
+  return new Promise((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => resolve({ width: image.naturalWidth, height: image.naturalHeight });
+    image.onerror = reject;
+    image.src = src;
+  });
+}
+
+function extractOcrCandidates(data: unknown, image: OcrImage, page: DocumentPage): OcrCandidate[] {
+  const pageData = data as {
+    text?: string;
+    confidence?: number;
+    tsv?: string | null;
+    blocks?: Array<{
+      paragraphs?: Array<{
+        lines?: Array<{
+          text?: string;
+          confidence?: number;
+          bbox?: { x0: number; y0: number; x1: number; y1: number };
+        }>;
+      }>;
+    }> | null;
+  };
+  const lines =
+    pageData.blocks?.flatMap((block) => block.paragraphs?.flatMap((paragraph) => paragraph.lines ?? []) ?? []) ?? [];
+  const tsvLines = pageData.tsv ? parseTsvLines(pageData.tsv) : [];
+  const sourceLines =
+    lines.length > 0
+      ? splitPositionedLines(lines)
+      : tsvLines.length > 0
+        ? tsvLines
+      : pageData.text
+          ?.split("\n")
+          .map((text, index) => ({
+            text,
+            confidence: pageData.confidence ?? 0,
+            bbox: {
+              x0: image.widthPx * 0.05,
+              y0: image.heightPx * (0.06 + index * 0.045),
+              x1: image.widthPx * 0.95,
+              y1: image.heightPx * (0.09 + index * 0.045),
+            },
+          })) ?? [];
+
+  return sourceLines
+    .map((line, index) => {
+      const text = (line.text ?? "").replace(/\s+/g, " ").trim();
+      const bbox = line.bbox;
+      if (!text || !bbox) {
+        return null;
+      }
+
+      const xMm = clamp((bbox.x0 / image.widthPx) * page.widthMm, 0, page.widthMm);
+      const yMm = clamp((bbox.y0 / image.heightPx) * page.heightMm, 0, page.heightMm);
+      const widthMm = clamp(((bbox.x1 - bbox.x0) / image.widthPx) * page.widthMm, 4, page.widthMm - xMm);
+      const heightMm = clamp(((bbox.y1 - bbox.y0) / image.heightPx) * page.heightMm, 3, page.heightMm - yMm);
+      const textStyle = inferOcrTextStyle(text, widthMm, heightMm, page);
+
+      return {
+        id: `ocr-${index}-${crypto.randomUUID()}`,
+        text,
+        confidence: clamp(line.confidence ?? 0, 0, 100),
+        xMm: roundMm(xMm),
+        yMm: roundMm(yMm),
+        widthMm: roundMm(widthMm),
+        heightMm: roundMm(heightMm),
+        selected: true,
+        ...textStyle,
+      };
+    })
+    .filter((candidate): candidate is OcrCandidate => Boolean(candidate))
+    .sort((a, b) => a.yMm - b.yMm || a.xMm - b.xMm);
+}
+
+function parseTsvLines(tsv: string): Array<{
+  text: string;
+  confidence: number;
+  bbox: { x0: number; y0: number; x1: number; y1: number };
+}> {
+  const rows = tsv
+    .split(/\r?\n/)
+    .map((row) => row.trim())
+    .filter(Boolean);
+  const header = rows.shift()?.split("\t") ?? [];
+  const indexes = {
+    level: header.indexOf("level"),
+    block: header.indexOf("block_num"),
+    paragraph: header.indexOf("par_num"),
+    line: header.indexOf("line_num"),
+    left: header.indexOf("left"),
+    top: header.indexOf("top"),
+    width: header.indexOf("width"),
+    height: header.indexOf("height"),
+    confidence: header.indexOf("conf"),
+    text: header.indexOf("text"),
+  };
+
+  if (Object.values(indexes).some((index) => index < 0)) {
+    return [];
+  }
+
+  const grouped = new Map<
+    string,
+    {
+      words: string[];
+      positionedWords: Array<{
+        text: string;
+        confidence: number;
+        bbox: { x0: number; y0: number; x1: number; y1: number };
+      }>;
+      confidences: number[];
+      x0: number;
+      y0: number;
+      x1: number;
+      y1: number;
+    }
+  >();
+
+  for (const row of rows) {
+    const columns = row.split("\t");
+    const text = columns.slice(indexes.text).join("\t").trim();
+    const confidence = Number(columns[indexes.confidence]);
+    if (columns[indexes.level] !== "5" || !text || confidence < 0) {
+      continue;
+    }
+
+    const left = Number(columns[indexes.left]);
+    const top = Number(columns[indexes.top]);
+    const width = Number(columns[indexes.width]);
+    const height = Number(columns[indexes.height]);
+    if (![left, top, width, height].every(Number.isFinite) || width <= 0 || height <= 0) {
+      continue;
+    }
+
+    const key = `${columns[indexes.block]}-${columns[indexes.paragraph]}-${columns[indexes.line]}`;
+    const existing = grouped.get(key);
+    const positionedWord = {
+      text,
+      confidence,
+      bbox: { x0: left, y0: top, x1: left + width, y1: top + height },
+    };
+    if (existing) {
+      existing.words.push(text);
+      existing.positionedWords.push(positionedWord);
+      existing.confidences.push(confidence);
+      existing.x0 = Math.min(existing.x0, left);
+      existing.y0 = Math.min(existing.y0, top);
+      existing.x1 = Math.max(existing.x1, left + width);
+      existing.y1 = Math.max(existing.y1, top + height);
+    } else {
+      grouped.set(key, {
+        words: [text],
+        positionedWords: [positionedWord],
+        confidences: [confidence],
+        x0: left,
+        y0: top,
+        x1: left + width,
+        y1: top + height,
+      });
+    }
+  }
+
+  return splitPositionedLines(
+    Array.from(grouped.values()).map((line) => ({
+      text: line.words.join(" "),
+      confidence: line.confidences.reduce((sum, value) => sum + value, 0) / line.confidences.length,
+      bbox: {
+        x0: line.x0,
+        y0: line.y0,
+        x1: line.x1,
+        y1: line.y1,
+      },
+      words: line.positionedWords,
+    })),
+  );
+}
+
+function inferOcrTextStyle(
+  text: string,
+  widthMm: number,
+  heightMm: number,
+  page: DocumentPage,
+): Pick<OcrCandidate, "fontSize" | "fontWeight" | "align"> {
+  const compactText = text.replace(/\s+/g, "");
+  const mostlyUppercase =
+    compactText.length > 2 && compactText.replace(/[^A-Za-z]/g, "").length > 0 && compactText === compactText.toUpperCase();
+  const largeOnPage = heightMm > page.heightMm * 0.018 || widthMm > page.widthMm * 0.24;
+  const tinyField = heightMm < page.heightMm * 0.012;
+  const fontSize = tinyField
+    ? clamp(roundMm(heightMm * 2.85), 5.5, 9)
+    : clamp(roundMm(heightMm * 2.45), 7, largeOnPage ? 24 : 15);
+
+  return {
+    fontSize,
+    fontWeight: largeOnPage || mostlyUppercase ? "700" : "400",
+    align: widthMm > page.widthMm * 0.2 && text.length < 28 ? "center" : "left",
+  };
+}
+
+function splitPositionedLines(
+  lines: Array<{
+    text?: string;
+    confidence?: number;
+    bbox?: { x0: number; y0: number; x1: number; y1: number };
+    words?: Array<{
+      text?: string;
+      confidence?: number;
+      bbox?: { x0: number; y0: number; x1: number; y1: number };
+    }>;
+  }>,
+): Array<{
+  text: string;
+  confidence: number;
+  bbox: { x0: number; y0: number; x1: number; y1: number };
+}> {
+  return lines.flatMap((line) => {
+    const words = (line.words ?? [])
+      .filter((word) => word.text?.trim() && word.bbox)
+      .sort((a, b) => a.bbox!.x0 - b.bbox!.x0);
+    if (words.length < 2 || !line.bbox) {
+      return line.text && line.bbox
+        ? [{ text: line.text, confidence: line.confidence ?? 0, bbox: line.bbox }]
+        : [];
+    }
+
+    const averageWordHeight =
+      words.reduce((sum, word) => sum + (word.bbox!.y1 - word.bbox!.y0), 0) / Math.max(1, words.length);
+    const groups: typeof words[] = [[]];
+    let previous = words[0];
+    groups[0].push(previous);
+
+    for (const word of words.slice(1)) {
+      const gap = word.bbox!.x0 - previous.bbox!.x1;
+      const previousWidth = previous.bbox!.x1 - previous.bbox!.x0;
+      const isLargeGap = gap > Math.max(averageWordHeight * 1.8, previousWidth * 0.85);
+      if (isLargeGap) {
+        groups.push([]);
+      }
+      groups[groups.length - 1].push(word);
+      previous = word;
+    }
+
+    return groups.map((group) => {
+      const confidences = group.map((word) => word.confidence ?? line.confidence ?? 0);
+      return {
+        text: group.map((word) => word.text?.trim()).filter(Boolean).join(" "),
+        confidence: confidences.reduce((sum, value) => sum + value, 0) / confidences.length,
+        bbox: {
+          x0: Math.min(...group.map((word) => word.bbox!.x0)),
+          y0: Math.min(...group.map((word) => word.bbox!.y0)),
+          x1: Math.max(...group.map((word) => word.bbox!.x1)),
+          y1: Math.max(...group.map((word) => word.bbox!.y1)),
+        },
+      };
+    });
+  });
+}
+
+async function detectLayoutShapes(image: OcrImage, page: DocumentPage): Promise<OcrLayoutShape[]> {
+  const sourceImage = await loadImageElement(image.src);
+  const scale = Math.min(1, 1200 / Math.max(image.widthPx, image.heightPx));
+  const width = Math.max(1, Math.round(image.widthPx * scale));
+  const height = Math.max(1, Math.round(image.heightPx * scale));
+  const canvas = document.createElement("canvas");
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    return [];
+  }
+
+  context.drawImage(sourceImage, 0, 0, width, height);
+  const pixels = context.getImageData(0, 0, width, height).data;
+  const isDark = (x: number, y: number) => {
+    const index = (y * width + x) * 4;
+    const alpha = pixels[index + 3] / 255;
+    const luminance = pixels[index] * 0.299 + pixels[index + 1] * 0.587 + pixels[index + 2] * 0.114;
+    return alpha > 0.25 && luminance < 115;
+  };
+
+  const horizontalRows: Array<{ y: number; ranges: Array<[number, number]> }> = [];
+  for (let y = 0; y < height; y += 1) {
+    const ranges = findDarkRuns(width, (x) => isDark(x, y), 4).filter(([start, end]) => end - start > width * 0.055);
+    if (ranges.length > 0) {
+      horizontalRows.push({ y, ranges });
+    }
+  }
+
+  const verticalColumns: Array<{ x: number; ranges: Array<[number, number]> }> = [];
+  for (let x = 0; x < width; x += 1) {
+    const ranges = findDarkRuns(height, (y) => isDark(x, y), 4).filter(([start, end]) => end - start > height * 0.03);
+    if (ranges.length > 0) {
+      verticalColumns.push({ x, ranges });
+    }
+  }
+
+  const horizontals = mergeHorizontalRows(horizontalRows);
+  const verticals = mergeVerticalColumns(verticalColumns);
+  const barcodeZones = detectBarcodeZones(verticals, width, height);
+  const boxes = findBoxesFromLines(horizontals, verticals, width, height, barcodeZones);
+  const boxEdgeIds = new Set(boxes.flatMap((box) => box.edgeIds));
+  const standaloneHorizontals = horizontals
+    .filter((line) => !boxEdgeIds.has(line.id))
+    .filter((line) => line.x1 - line.x0 > width * 0.28)
+    .map((line, index) => ({
+      id: `layout-h-${index}-${crypto.randomUUID()}`,
+      kind: "line" as const,
+      label: `Linia pozioma ${index + 1}`,
+      xMm: roundMm((line.x0 / width) * page.widthMm),
+      yMm: roundMm((line.y / height) * page.heightMm),
+      widthMm: roundMm(((line.x1 - line.x0) / width) * page.widthMm),
+      heightMm: 1,
+      selected: true,
+    }));
+  const standaloneVerticals = verticals
+    .filter((line) => !boxEdgeIds.has(line.id))
+    .filter((line) => isVerticalConnectedToHorizontals(line, horizontals, width, height))
+    .filter((line) => !barcodeZones.some((zone) => pixelRectanglesOverlapRatio({ x0: line.x - 2, y0: line.y0, x1: line.x + 2, y1: line.y1 }, zone) > 0.2))
+    .filter((line) => isUsefulStandaloneVertical(line, boxes, height))
+    .map((line, index) => ({
+      id: `layout-v-${index}-${crypto.randomUUID()}`,
+      kind: "line" as const,
+      label: `Linia pionowa ${index + 1}`,
+      xMm: roundMm((line.x / width) * page.widthMm),
+      yMm: roundMm((line.y0 / height) * page.heightMm),
+      widthMm: 1,
+      heightMm: roundMm(((line.y1 - line.y0) / height) * page.heightMm),
+      selected: true,
+    }));
+
+  const boxShapes = boxes.map((box, index) => ({
+    id: `layout-b-${index}-${crypto.randomUUID()}`,
+    kind: "box" as const,
+    label: `Ramka ${index + 1}`,
+    xMm: roundMm((box.x0 / width) * page.widthMm),
+    yMm: roundMm((box.y0 / height) * page.heightMm),
+    widthMm: roundMm(((box.x1 - box.x0) / width) * page.widthMm),
+    heightMm: roundMm(((box.y1 - box.y0) / height) * page.heightMm),
+    selected: true,
+  }));
+  const dividerShapes = findBoxDividers(boxes, verticals, width, height, page, barcodeZones);
+
+  return [...boxShapes, ...dividerShapes, ...standaloneHorizontals, ...standaloneVerticals]
+    .filter((shape) => (shape.kind === "line" ? Math.max(shape.widthMm, shape.heightMm) >= 6 : shape.widthMm >= 6 && shape.heightMm >= 3))
+    .slice(0, 80);
+}
+
+function mergeOcrCandidates(candidates: OcrCandidate[]) {
+  const merged: OcrCandidate[] = [];
+  for (const candidate of candidates.sort((a, b) => a.yMm - b.yMm || a.xMm - b.xMm)) {
+    const duplicate = merged.some(
+      (existing) =>
+        rectanglesOverlapRatio(existing, candidate) > 0.55 ||
+        (existing.text === candidate.text && Math.abs(existing.xMm - candidate.xMm) < 2 && Math.abs(existing.yMm - candidate.yMm) < 2),
+    );
+    if (!duplicate) {
+      merged.push(candidate);
+    }
+  }
+  return merged;
+}
+
+function filterLayoutShapes(shapes: OcrLayoutShape[], candidates: OcrCandidate[], page: DocumentPage) {
+  const largeTextCandidates = candidates.filter(
+    (candidate) => candidate.fontSize && candidate.fontSize >= 24 && candidate.widthMm > 10 && candidate.heightMm > 8,
+  );
+
+  return shapes.filter((shape) => {
+    if (shape.kind !== "box") {
+      return true;
+    }
+
+    const smallBox = shape.widthMm < page.widthMm * 0.13 && shape.heightMm < page.heightMm * 0.08;
+    const inLogoArea = shape.xMm < page.widthMm * 0.22 && shape.yMm < page.heightMm * 0.18;
+    if (smallBox && inLogoArea) {
+      return false;
+    }
+
+    const overlapsLargeText = largeTextCandidates.some((candidate) => rectanglesOverlapRatio(shape, candidate) > 0.18);
+    if (smallBox && overlapsLargeText) {
+      return false;
+    }
+
+    return true;
+  });
+}
+
+async function detectLargeTextCandidates(image: OcrImage, page: DocumentPage, ocrData: unknown): Promise<OcrCandidate[]> {
+  const pageData = ocrData as { text?: string };
+  if (/\bCA\b/.test(pageData.text ?? "")) {
+    return [];
+  }
+
+  const canvas = document.createElement("canvas");
+  const scale = Math.min(1, 900 / Math.max(image.widthPx, image.heightPx));
+  const width = Math.max(1, Math.round(image.widthPx * scale));
+  const height = Math.max(1, Math.round(image.heightPx * scale));
+  canvas.width = width;
+  canvas.height = height;
+  const context = canvas.getContext("2d", { willReadFrequently: true });
+  if (!context) {
+    return [];
+  }
+
+  const element = await loadImageElement(image.src);
+
+  context.drawImage(element, 0, 0, width, height);
+  const pixels = context.getImageData(0, 0, width, height).data;
+  const dark = new Uint8Array(width * height);
+  for (let index = 0; index < width * height; index += 1) {
+    const pixelIndex = index * 4;
+    const luminance = pixels[pixelIndex] * 0.299 + pixels[pixelIndex + 1] * 0.587 + pixels[pixelIndex + 2] * 0.114;
+    dark[index] = luminance < 95 ? 1 : 0;
+  }
+
+  const visited = new Uint8Array(width * height);
+  const components: Array<{ x0: number; y0: number; x1: number; y1: number; area: number }> = [];
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const startIndex = y * width + x;
+      if (!dark[startIndex] || visited[startIndex]) {
+        continue;
+      }
+
+      const queue: Array<[number, number]> = [[x, y]];
+      visited[startIndex] = 1;
+      let cursor = 0;
+      let x0 = x;
+      let y0 = y;
+      let x1 = x;
+      let y1 = y;
+      let area = 0;
+
+      while (cursor < queue.length) {
+        const [currentX, currentY] = queue[cursor++];
+        area += 1;
+        x0 = Math.min(x0, currentX);
+        y0 = Math.min(y0, currentY);
+        x1 = Math.max(x1, currentX);
+        y1 = Math.max(y1, currentY);
+
+        for (const [nextX, nextY] of [
+          [currentX + 1, currentY],
+          [currentX - 1, currentY],
+          [currentX, currentY + 1],
+          [currentX, currentY - 1],
+        ]) {
+          if (nextX < 0 || nextY < 0 || nextX >= width || nextY >= height) {
+            continue;
+          }
+          const nextIndex = nextY * width + nextX;
+          if (dark[nextIndex] && !visited[nextIndex]) {
+            visited[nextIndex] = 1;
+            queue.push([nextX, nextY]);
+          }
+        }
+      }
+
+      components.push({ x0, y0, x1, y1, area });
+    }
+  }
+
+  const largeComponents = components.filter((component) => {
+    const componentWidth = component.x1 - component.x0;
+    const componentHeight = component.y1 - component.y0;
+    return componentWidth > width * 0.035 && componentHeight > height * 0.055 && component.area > 400;
+  });
+
+  const caLike = largeComponents.filter((component) => component.y0 > height * 0.55 && component.x0 > width * 0.45);
+  if (caLike.length < 2) {
+    return [];
+  }
+
+  const x0 = Math.min(...caLike.map((component) => component.x0));
+  const y0 = Math.min(...caLike.map((component) => component.y0));
+  const x1 = Math.max(...caLike.map((component) => component.x1));
+  const y1 = Math.max(...caLike.map((component) => component.y1));
+  const candidateWidthMm = ((x1 - x0) / width) * page.widthMm;
+  const candidateHeightMm = ((y1 - y0) / height) * page.heightMm;
+
+  if (candidateWidthMm < 12 || candidateHeightMm < 10) {
+    return [];
+  }
+
+  return [
+    {
+      id: `ocr-large-${crypto.randomUUID()}`,
+      text: "CA",
+      confidence: 35,
+      xMm: roundMm((x0 / width) * page.widthMm),
+      yMm: roundMm((y0 / height) * page.heightMm),
+      widthMm: roundMm(candidateWidthMm),
+      heightMm: roundMm(candidateHeightMm),
+      selected: true,
+      fontSize: clamp(roundMm(candidateHeightMm * 3.2), 28, 72),
+      fontWeight: "700",
+      align: "center",
+    },
+  ];
+}
+
+function rectanglesOverlapRatio(
+  a: Pick<OcrCandidate, "xMm" | "yMm" | "widthMm" | "heightMm">,
+  b: Pick<OcrCandidate, "xMm" | "yMm" | "widthMm" | "heightMm">,
+) {
+  const x0 = Math.max(a.xMm, b.xMm);
+  const y0 = Math.max(a.yMm, b.yMm);
+  const x1 = Math.min(a.xMm + a.widthMm, b.xMm + b.widthMm);
+  const y1 = Math.min(a.yMm + a.heightMm, b.yMm + b.heightMm);
+  const intersection = Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+  const smallerArea = Math.min(a.widthMm * a.heightMm, b.widthMm * b.heightMm);
+  return smallerArea > 0 ? intersection / smallerArea : 0;
+}
+
+function loadImageElement(src: string): Promise<HTMLImageElement> {
+  return new Promise((resolve, reject) => {
+    const image = new window.Image();
+    image.onload = () => resolve(image);
+    image.onerror = reject;
+    image.src = src;
+  });
+}
+
+function findDarkRuns(length: number, isDark: (index: number) => boolean, gapTolerance: number): Array<[number, number]> {
+  const runs: Array<[number, number]> = [];
+  let start: number | null = null;
+  let lastDark = 0;
+
+  for (let index = 0; index < length; index += 1) {
+    if (isDark(index)) {
+      if (start === null) {
+        start = index;
+      }
+      lastDark = index;
+      continue;
+    }
+
+    if (start !== null && index - lastDark > gapTolerance) {
+      runs.push([start, lastDark]);
+      start = null;
+    }
+  }
+
+  if (start !== null) {
+    runs.push([start, lastDark]);
+  }
+
+  return runs;
+}
+
+type DetectedHorizontal = { id: string; x0: number; x1: number; y: number; thickness: number };
+type DetectedVertical = { id: string; y0: number; y1: number; x: number; thickness: number };
+
+function mergeHorizontalRows(rows: Array<{ y: number; ranges: Array<[number, number]> }>): DetectedHorizontal[] {
+  const lines: DetectedHorizontal[] = [];
+  for (const row of rows) {
+    for (const [x0, x1] of row.ranges) {
+      const existing = lines.find(
+        (line) => Math.abs(line.y - row.y) <= 4 && Math.abs(line.x0 - x0) <= 12 && Math.abs(line.x1 - x1) <= 12,
+      );
+      if (existing) {
+        existing.y = (existing.y * existing.thickness + row.y) / (existing.thickness + 1);
+        existing.x0 = Math.min(existing.x0, x0);
+        existing.x1 = Math.max(existing.x1, x1);
+        existing.thickness += 1;
+      } else {
+        lines.push({ id: `h-${lines.length}`, x0, x1, y: row.y, thickness: 1 });
+      }
+    }
+  }
+  return lines;
+}
+
+function mergeVerticalColumns(columns: Array<{ x: number; ranges: Array<[number, number]> }>): DetectedVertical[] {
+  const lines: DetectedVertical[] = [];
+  for (const column of columns) {
+    for (const [y0, y1] of column.ranges) {
+      const existing = lines.find(
+        (line) => Math.abs(line.x - column.x) <= 4 && Math.abs(line.y0 - y0) <= 12 && Math.abs(line.y1 - y1) <= 12,
+      );
+      if (existing) {
+        existing.x = (existing.x * existing.thickness + column.x) / (existing.thickness + 1);
+        existing.y0 = Math.min(existing.y0, y0);
+        existing.y1 = Math.max(existing.y1, y1);
+        existing.thickness += 1;
+      } else {
+        lines.push({ id: `v-${lines.length}`, y0, y1, x: column.x, thickness: 1 });
+      }
+    }
+  }
+  return lines;
+}
+
+function findBoxesFromLines(
+  horizontals: DetectedHorizontal[],
+  verticals: DetectedVertical[],
+  width: number,
+  height: number,
+  barcodeZones: Array<{ x0: number; y0: number; x1: number; y1: number }>,
+) {
+  const boxes: Array<{ x0: number; y0: number; x1: number; y1: number; edgeIds: string[] }> = [];
+  const tolerance = Math.max(8, Math.round(Math.min(width, height) * 0.015));
+
+  for (const top of horizontals) {
+    for (const bottom of horizontals) {
+      if (bottom.y - top.y < height * 0.035) {
+        continue;
+      }
+      const x0 = Math.max(top.x0, bottom.x0);
+      const x1 = Math.min(top.x1, bottom.x1);
+      if (x1 - x0 < width * 0.045) {
+        continue;
+      }
+
+      const left = verticals.find(
+        (line) =>
+          Math.abs(line.x - x0) <= tolerance &&
+          line.y0 <= top.y + tolerance &&
+          line.y1 >= bottom.y - tolerance,
+      );
+      const right = verticals.find(
+        (line) =>
+          Math.abs(line.x - x1) <= tolerance &&
+          line.y0 <= top.y + tolerance &&
+          line.y1 >= bottom.y - tolerance,
+      );
+      if (!left || !right) {
+        continue;
+      }
+
+      const duplicate = boxes.some(
+        (box) =>
+          Math.abs(box.x0 - x0) <= tolerance &&
+          Math.abs(box.x1 - x1) <= tolerance &&
+          Math.abs(box.y0 - top.y) <= tolerance &&
+          Math.abs(box.y1 - bottom.y) <= tolerance,
+      );
+      const candidateBox = { x0, y0: top.y, x1, y1: bottom.y };
+      const inBarcodeZone = barcodeZones.some((zone) => pixelRectanglesOverlapRatio(candidateBox, zone) > 0.18);
+      const barcodeLikeBox = isBarcodeLikeBox(candidateBox, verticals, width, height);
+      if (!duplicate && !inBarcodeZone && !barcodeLikeBox) {
+        boxes.push({ x0, y0: top.y, x1, y1: bottom.y, edgeIds: [top.id, bottom.id, left.id, right.id] });
+      }
+    }
+  }
+
+  return boxes
+    .filter((box) => {
+      const boxWidth = box.x1 - box.x0;
+      const boxHeight = box.y1 - box.y0;
+      return boxWidth > width * 0.04 && boxHeight > height * 0.035 && boxWidth / Math.max(1, boxHeight) < 8;
+    })
+    .sort((a, b) => a.y0 - b.y0 || a.x0 - b.x0)
+    .slice(0, 40);
+}
+
+function isBarcodeLikeBox(
+  box: { x0: number; y0: number; x1: number; y1: number },
+  verticals: DetectedVertical[],
+  width: number,
+  height: number,
+) {
+  const boxWidth = box.x1 - box.x0;
+  const boxHeight = box.y1 - box.y0;
+  if (boxHeight < height * 0.08 || boxWidth > width * 0.16) {
+    return false;
+  }
+
+  const internalVerticals = verticals.filter(
+    (line) =>
+      line.x > box.x0 - 3 &&
+      line.x < box.x1 + 3 &&
+      line.y0 < box.y0 + boxHeight * 0.18 &&
+      line.y1 > box.y1 - boxHeight * 0.18,
+  );
+
+  return internalVerticals.length >= 5;
+}
+
+function detectBarcodeZones(verticals: DetectedVertical[], width: number, height: number) {
+  const candidates = verticals
+    .filter((line) => line.y1 - line.y0 > height * 0.12 && line.y1 - line.y0 < height * 0.35)
+    .sort((a, b) => a.x - b.x);
+  const zones: Array<{ x0: number; y0: number; x1: number; y1: number }> = [];
+  let group: DetectedVertical[] = [];
+
+  for (const line of candidates) {
+    const previous = group[group.length - 1];
+    const overlapsVertically =
+      !previous || Math.min(previous.y1, line.y1) - Math.max(previous.y0, line.y0) > Math.min(previous.y1 - previous.y0, line.y1 - line.y0) * 0.55;
+    if (!previous || (Math.abs(line.x - previous.x) < width * 0.065 && overlapsVertically)) {
+      group.push(line);
+    } else {
+      pushBarcodeZone(group, zones);
+      group = [line];
+    }
+  }
+  pushBarcodeZone(group, zones);
+
+  return zones;
+}
+
+function findBoxDividers(
+  boxes: Array<{ x0: number; y0: number; x1: number; y1: number }>,
+  verticals: DetectedVertical[],
+  width: number,
+  height: number,
+  page: DocumentPage,
+  barcodeZones: Array<{ x0: number; y0: number; x1: number; y1: number }>,
+): OcrLayoutShape[] {
+  const dividers: OcrLayoutShape[] = [];
+  const sortedBoxes = boxes
+    .filter((box) => box.x1 - box.x0 > width * 0.2 && box.y1 - box.y0 > height * 0.08)
+    .sort((a, b) => (b.x1 - b.x0) * (b.y1 - b.y0) - (a.x1 - a.x0) * (a.y1 - a.y0));
+
+  for (const box of sortedBoxes) {
+    const boxHeight = box.y1 - box.y0;
+    const candidates = verticals.filter((line) => {
+      const rect = { x0: line.x - 2, y0: line.y0, x1: line.x + 2, y1: line.y1 };
+      const inBarcodeZone = barcodeZones.some((zone) => pixelRectanglesOverlapRatio(rect, zone) > 0.2);
+      return (
+        !inBarcodeZone &&
+        line.x > box.x0 + 8 &&
+        line.x < box.x1 - 8 &&
+        Math.abs(line.y0 - box.y0) < Math.max(8, height * 0.02) &&
+        Math.abs(line.y1 - box.y1) < Math.max(8, height * 0.02) &&
+        line.y1 - line.y0 > boxHeight * 0.82
+      );
+    });
+
+    for (const line of candidates) {
+      const duplicate = dividers.some(
+        (divider) =>
+          Math.abs(divider.xMm - (line.x / width) * page.widthMm) < 1.5 &&
+          Math.abs(divider.yMm - (line.y0 / height) * page.heightMm) < 2,
+      );
+      if (!duplicate) {
+        dividers.push({
+          id: `layout-divider-${dividers.length}-${crypto.randomUUID()}`,
+          kind: "line",
+          label: `Separator ramki ${dividers.length + 1}`,
+          xMm: roundMm((line.x / width) * page.widthMm),
+          yMm: roundMm((box.y0 / height) * page.heightMm),
+          widthMm: 1,
+          heightMm: roundMm((boxHeight / height) * page.heightMm),
+          selected: true,
+        });
+      }
+    }
+  }
+
+  return dividers;
+}
+
+function pushBarcodeZone(
+  group: DetectedVertical[],
+  zones: Array<{ x0: number; y0: number; x1: number; y1: number }>,
+) {
+  if (group.length < 6) {
+    return;
+  }
+
+  zones.push({
+    x0: Math.min(...group.map((line) => line.x)) - 14,
+    y0: Math.min(...group.map((line) => line.y0)) - 10,
+    x1: Math.max(...group.map((line) => line.x)) + 14,
+    y1: Math.max(...group.map((line) => line.y1)) + 10,
+  });
+}
+
+function pixelRectanglesOverlapRatio(
+  a: { x0: number; y0: number; x1: number; y1: number },
+  b: { x0: number; y0: number; x1: number; y1: number },
+) {
+  const x0 = Math.max(a.x0, b.x0);
+  const y0 = Math.max(a.y0, b.y0);
+  const x1 = Math.min(a.x1, b.x1);
+  const y1 = Math.min(a.y1, b.y1);
+  const intersection = Math.max(0, x1 - x0) * Math.max(0, y1 - y0);
+  const area = Math.max(1, (a.x1 - a.x0) * (a.y1 - a.y0));
+  return intersection / area;
+}
+
+function isUsefulStandaloneVertical(
+  line: DetectedVertical,
+  boxes: Array<{ x0: number; y0: number; x1: number; y1: number }>,
+  height: number,
+) {
+  const containingBox = boxes.find(
+    (box) =>
+      line.x > box.x0 + 4 &&
+      line.x < box.x1 - 4 &&
+      line.y0 >= box.y0 - 6 &&
+      line.y1 <= box.y1 + 6,
+  );
+  if (!containingBox) {
+    return true;
+  }
+
+  const lineHeight = line.y1 - line.y0;
+  const boxHeight = containingBox.y1 - containingBox.y0;
+  return lineHeight > boxHeight * 0.85 && lineHeight > height * 0.08;
+}
+
+function isVerticalConnectedToHorizontals(
+  vertical: DetectedVertical,
+  horizontals: DetectedHorizontal[],
+  width: number,
+  height: number,
+) {
+  if (vertical.y1 - vertical.y0 < height * 0.05) {
+    return false;
+  }
+
+  const tolerance = Math.max(8, Math.round(Math.min(width, height) * 0.015));
+  const touchesTop = horizontals.some(
+    (horizontal) =>
+      Math.abs(horizontal.y - vertical.y0) <= tolerance &&
+      horizontal.x0 <= vertical.x + tolerance &&
+      horizontal.x1 >= vertical.x - tolerance,
+  );
+  const touchesBottom = horizontals.some(
+    (horizontal) =>
+      Math.abs(horizontal.y - vertical.y1) <= tolerance &&
+      horizontal.x0 <= vertical.x + tolerance &&
+      horizontal.x1 >= vertical.x - tolerance,
+  );
+
+  return touchesTop && touchesBottom;
+}
+
 function getPageOrientation(page: Pick<DocumentPage, "widthMm" | "heightMm">): PageOrientation {
   return page.widthMm > page.heightMm ? "landscape" : "portrait";
+}
+
+function getImageOrientation(width: number, height: number): PageOrientation {
+  return width > height ? "landscape" : "portrait";
+}
+
+function formatOrientationLabel(orientation: PageOrientation) {
+  return orientation === "landscape" ? "poziomo" : "pionowo";
 }
 
 function orientPageSize(
